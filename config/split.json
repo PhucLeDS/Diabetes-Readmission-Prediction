@@ -1,0 +1,7 @@
+{
+  "algorithm": "sha256_rank_stratified_two_stage_v1",
+  "seed": 42,
+  "test_ratio": "0.20",
+  "validation_ratio_of_development": "0.20",
+  "stratify_by": "readmitted"
+}

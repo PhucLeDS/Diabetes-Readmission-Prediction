@@ -207,3 +207,34 @@ The binary target follows the Any Readmission mapping in the reference project's
 [02_split_export.ipynb](../notebooks/02_split_export.ipynb) reads the saved CSV, checks its checksum, schema, original label counts, and identifier uniqueness, then constructs the binary target in memory. The loader accepts LF or CRLF representations of the preparation configuration when the checksum for one representation matches the manifest. The data CSV still requires an exact byte match.
 
 The internal table has 36 columns, including both identifiers and both target representations. The model view has 33 columns, consisting of the 32 ordered predictors and `class` in the final position. Every predictor value was verified against the saved CSV across all 69,990 rows. The model view retains 1,919 empty `race` fields and 3 empty `gender` fields across 1,920 rows. The source CSV retains its original three labels and the checksum recorded in Section 6. The binary counts also match the totals across the reference Any Readmission partitions.
+
+## 8. Data Splitting
+
+The split reads the saved `full_prepared.csv` and uses the policy in [split.json](../config/split.json). The reference implementation is `make_split_assignments()`, `_rank()`, `_one_fifth_rounded()`, and `_class_quotas()` in `src/preparation/data_splitting.py` of the reference project.
+
+1. Group the cohort by the three original `readmitted` labels. Set the test size to 20% of the cohort, rounded to the nearest integer with half ties rounded up.
+2. Allocate that size across labels by largest remainder. Assign the integer portion of each proportional quota first, then distribute remaining slots by fractional remainder, breaking ties in the order `NO`, `<30`, `>30`.
+3. Within each label, rank encounters by the SHA-256 digest of the ASCII string `42|test|encounter_id`, where `encounter_id` is the ID value. Break hash ties by numeric encounter ID, then by its original text. Assign the lowest ranks in each class to test.
+4. Apply the same size, quota, and ranking rules to select 20% of the remaining development encounters for validation, using the stage name `validation` in the hash. Assign the remaining encounters to train.
+
+The primary CSVs preserve ascending numeric encounter order, with original ID text breaking ties. The combined CSV appends validation rows after train rows in their respective orders. Each model file uses 32 predictors followed by the binary `class` in a 33-column UTF-8 CSV. The split manifest stores `encounter_id`, `patient_nbr`, and `split` in encounter order.
+
+| Dataset | Rows | Original `NO` | Original `<30` | Original `>30` | `not_readmitted` | `readmitted` | Readmitted share |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Train | 44,794 | 26,547 | 4,022 | 14,225 | 26,547 | 18,247 | 40.74% |
+| Validation | 11,198 | 6,636 | 1,006 | 3,556 | 6,636 | 4,562 | 40.74% |
+| Test | 13,998 | 8,296 | 1,257 | 4,445 | 8,296 | 5,702 | 40.73% |
+| Train + validation | 55,992 | 33,183 | 5,028 | 17,781 | 33,183 | 22,809 | 40.74% |
+
+| Dataset | Empty `race` fields | Empty `gender` fields | Rows with at least one empty field |
+| --- | ---: | ---: | ---: |
+| Train | 1,207 | 2 | 1,208 |
+| Validation | 315 | 0 | 315 |
+| Test | 397 | 1 | 397 |
+| Train + validation | 1,522 | 2 | 1,523 |
+
+All other exported columns have zero empty fields. CSV read-back confirmed ordered schema and field values, including empty fields and literal laboratory categories.
+
+The manifest covers all 69,990 encounters with no repeated encounters or patients across the primary splits. Every assignment and all four model CSVs match the reference membership, values, and row order. Reversing input row order produced the same assignments. A separate run from the saved cohort reproduced the four model CSVs and the split manifest byte for byte. The full prepared CSV and its preparation manifest retained their checksums.
+
+[02_split_export.ipynb](../notebooks/02_split_export.ipynb) presents the verified file counts and missingness. The combined file is intended for final training once model selection is complete, and test remains reserved for final evaluation.
