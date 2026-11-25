@@ -5,10 +5,18 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from platform import python_version
 
-from src.io_utils import CsvValue, read_json, write_csv
-from src.paths import CONFIG_DIR, INTERIM_DIR, PREPARATION_OUTPUT_DIR
-from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, ID_COLUMNS, TARGET_COLUMN, TARGET_LABELS, RawTable
+from src.io_utils import CsvValue, read_csv, read_json, sha256_file, write_csv, write_json
+from src.paths import (
+    CONFIG_DIR, IDS_MAPPING_PATH, INTERIM_DIR, PREPARATION_OUTPUT_DIR,
+    PROCESSED_DIR, PROJECT_ROOT, RAW_DATA_PATH,
+)
+from src.preparation.data_cleaning import CLEANED_DATA_PATH, CLEANING_AUDIT_PATH
+from src.preparation.data_loading import (
+    COUNT_COLUMNS, ENCOUNTER_COLUMNS, ENCOUNTER_SHA256, ID_COLUMNS,
+    MAPPING_SHA256, TARGET_COLUMN, TARGET_LABELS, RawTable,
+)
 from src.validation import validate_required_columns, validate_schema, validate_target, validate_unique_ids
 
 
@@ -347,3 +355,126 @@ def save_feature_audit(
 ) -> Path:
     """Write the column decisions, positions, and missingness for this selection."""
     return write_csv(audit_path, FEATURE_AUDIT_COLUMNS, result.audit)
+
+
+FULL_PREPARED_PATH = PROCESSED_DIR / "full_prepared.csv"
+PREPARATION_MANIFEST_PATH = PREPARATION_OUTPUT_DIR / "preparation_manifest.json"
+
+
+def validate_full_prepared(
+    selected: FeatureSelectionResult,
+    cohort: CohortResult,
+    *,
+    config_path: Path = PREPARATION_CONFIG_PATH,
+) -> dict:
+    """Verify schema, identifiers, and values against the ordered cohort."""
+    predictors = read_json(config_path)["feature_selection"]["predictors"]
+    expected_columns = (*ID_COLUMNS, *predictors, TARGET_COLUMN)
+    validate_schema(selected.columns, expected=expected_columns)
+    if len(selected.columns) != 35:
+        raise ValueError("The prepared schema must contain exactly 35 columns.")
+    if not selected.rows or len(selected.rows) != len(cohort.rows):
+        raise ValueError("The prepared table must contain one row for every cohort encounter.")
+    for column in ID_COLUMNS:
+        validate_unique_ids((row[column] for row in selected.rows), name=f"prepared {column}")
+    validate_target((row[TARGET_COLUMN] for row in selected.rows), allowed=TARGET_LABELS)
+    diagnosis_sources = dict(zip(DIAGNOSIS_GROUP_COLUMNS, DIAGNOSIS_COLUMNS, strict=True))
+
+    empty_counts: Counter[str] = Counter()
+    label_counts: Counter[str] = Counter()
+    rows_with_empty = 0
+    for row_number, (source, prepared) in enumerate(zip(cohort.rows, selected.rows, strict=True), start=1):
+        if tuple(prepared) != selected.columns:
+            raise ValueError(f"Unexpected prepared record schema at row {row_number}.")
+        has_empty = False
+        for column, value in prepared.items():
+            if column in diagnosis_sources:
+                expected = group_icd9(source[diagnosis_sources[column]])
+            else:
+                expected = source[column]
+            if value != expected:
+                raise ValueError(f"Prepared value differs from the cohort at row {row_number}, column {column!r}.")
+            if value == "":
+                empty_counts[column] += 1
+                has_empty = True
+        rows_with_empty += has_empty
+        label_counts[prepared[TARGET_COLUMN]] += 1
+
+    return {
+        "rows": len(selected.rows),
+        "columns": len(selected.columns),
+        "target_counts": {label: label_counts[label] for label in TARGET_LABELS},
+        "empty_cells_by_column": {column: empty_counts[column] for column in selected.columns},
+        "rows_with_empty_fields": rows_with_empty,
+    }
+
+
+def save_full_prepared(
+    selected: FeatureSelectionResult, cohort: CohortResult, *, project_root: Path = PROJECT_ROOT,
+) -> tuple[Path, Path, dict]:
+    """Save the prepared CSV, verify the round trip, and write its manifest."""
+    config_key = PREPARATION_CONFIG_PATH.relative_to(PROJECT_ROOT).as_posix()
+    statistics = validate_full_prepared(selected, cohort, config_path=project_root / config_key)
+    raw_hashes = {}
+    for source, expected in ((RAW_DATA_PATH, ENCOUNTER_SHA256), (IDS_MAPPING_PATH, MAPPING_SHA256)):
+        key = source.relative_to(PROJECT_ROOT).as_posix()
+        raw_hashes[key] = sha256_file(project_root / key)
+        if raw_hashes[key] != expected:
+            raise ValueError(f"Unexpected raw checksum for {key}.")
+
+    artifact_paths = (
+        CLEANED_DATA_PATH, COHORT_DATA_PATH, CLEANING_AUDIT_PATH,
+        COHORT_AUDIT_PATH, FEATURE_AUDIT_PATH,
+    )
+    artifact_keys = [path.relative_to(PROJECT_ROOT).as_posix() for path in artifact_paths]
+    artifact_hashes = {key: sha256_file(project_root / key) for key in artifact_keys}
+    full_key = FULL_PREPARED_PATH.relative_to(PROJECT_ROOT).as_posix()
+    csv_path = write_csv(project_root / full_key, selected.columns, selected.rows)
+    _, reloaded = read_csv(csv_path, expected_columns=selected.columns)
+    if reloaded != selected.rows:
+        raise ValueError(f"CSV round trip changed prepared records: {csv_path}")
+    artifact_hashes[full_key] = sha256_file(csv_path)
+    if any(sha256_file(project_root / key) != checksum for key, checksum in raw_hashes.items()):
+        raise RuntimeError("A raw source changed during full prepared export.")
+
+    schema = [
+        {
+            "name": row["column"],
+            "role": role,
+            "logical_type": row["logical_type"],
+        }
+        for row, role in _prepared_schema_rows(selected)
+    ]
+    manifest = {
+        "dataset": "full_prepared",
+        "manifest_version": 1,
+        "dataset_path": full_key,
+        "schema": schema,
+        "statistics": statistics,
+        "cohort": {
+            "flow": cohort.flow,
+            "excluded_by_discharge_code": cohort.excluded_by_code,
+            "unclear_discharge_retained": cohort.unclear_retained_by_code,
+        },
+        "raw_sha256": raw_hashes,
+        "configuration": {"path": config_key, "sha256": sha256_file(project_root / config_key)},
+        "artifact_sha256": artifact_hashes,
+        "validation": {
+            "ordered_schema": "passed",
+            "unique_identifiers": "passed",
+            "values_and_labels_against_cohort": "passed",
+            "csv_round_trip": "passed",
+            "raw_checksums": "passed",
+        },
+        "runtime": {"python": python_version()},
+    }
+    manifest_path = project_root / PREPARATION_MANIFEST_PATH.relative_to(PROJECT_ROOT)
+    write_json(manifest_path, manifest)
+    return csv_path, manifest_path, manifest
+
+
+def _prepared_schema_rows(selected: FeatureSelectionResult):
+    """Return feature audit entries in prepared column order with their schema roles."""
+    audit = {row["column"]: row for row in selected.audit if row["output_position"] is not None}
+    roles = {"retain_identifier": "identifier", "retain_predictor": "predictor", "retain_target": "target"}
+    return [(audit[column], roles[audit[column]["action"]]) for column in selected.columns]

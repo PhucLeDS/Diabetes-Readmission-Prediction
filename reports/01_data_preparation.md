@@ -165,3 +165,25 @@ The 15 source columns are dropped from the already grouped schema. The audit als
 All retained values were checked against the grouped cohort. The original labels remain `NO` (41,479), `<30` (6,285), and `>30` (22,226). The selected table contains 1,919 empty `race` fields and 3 empty `gender` fields across 1,920 encounters. The reduction in empty fields comes from column removal.
 
 The notebook writes `outputs/preparation/feature_audit.csv` with 60 entries. It records output positions, column roles, and before-and-after missingness where the column exists. The selected table is held in memory for the next step, which writes the full prepared CSV. [01_data_preparation.ipynb](../notebooks/01_data_preparation.ipynb)
+
+## 6. Full Prepared Dataset
+
+[01_data_preparation.ipynb](../notebooks/01_data_preparation.ipynb) builds `data/processed/full_prepared.csv` from the verified raw files. Its column order is `encounter_id`, `patient_nbr`, the 32 configured predictors, and the original `readmitted` target.
+
+| Measure | Verified value |
+| --- | ---: |
+| Encounters | 69,990 |
+| Unique patients | 69,990 |
+| Columns | 35 |
+| Original labels `NO` | 41,479 |
+| Original labels `<30` | 6,285 |
+| Original labels `>30` | 22,226 |
+| Empty `race` fields | 1,919 |
+| Empty `gender` fields | 3 |
+| Encounters with at least one empty field | 1,920 |
+
+The export verified the ordered schema, unique IDs, and every prepared value against the cohort. Reading the CSV back reproduced the in-memory table. The two raw SHA-256 checksums matched before and after export.
+
+The CSV has SHA-256 `0207daf2cb4f83700cf71337d39519aef7c7683e910a7ba6511216e6601a787f`. The local `outputs/preparation/preparation_manifest.json` records the schema, row and label counts, per-column empty counts, cohort flow, configuration checksum, and the checksums of 6 dataset and audit files.
+
+Both preparation notebooks ran from fresh kernels. A second run of the preparation notebook from raw files in a separate directory reproduced all 6 files and the manifest byte for byte.
