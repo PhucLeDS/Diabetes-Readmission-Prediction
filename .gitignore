@@ -35,3 +35,7 @@ Thumbs.db
 !/data/weka/.gitkeep
 /outputs/preparation/*
 !/outputs/preparation/.gitkeep
+
+# Generated EDA artifacts
+/outputs/tables/eda/*
+/outputs/figures/eda/*
