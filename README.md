@@ -140,7 +140,7 @@ Run the suite from the repository root with the project environment active.
 python -m unittest discover -s tests -v
 ```
 
-The full suite passed 61 tests. It executes the three notebooks twice in isolated workspaces and verifies 19 generated files byte for byte under the same Python version and configuration. The integration checks report a skip if either official raw CSV is absent. Weka loading is verified separately. [Final validation](reports/01_data_preparation.md#10-final-validation)
+The full suite passed 62 tests. It executes the three notebooks twice in isolated workspaces and verifies 19 generated files byte for byte under the same Python version and configuration. The integration checks report a skip if either official raw CSV is absent. Weka loading is verified separately. [Final validation](reports/01_data_preparation.md#10-final-validation)
 
 ## Limitations
 
