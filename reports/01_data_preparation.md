@@ -190,7 +190,7 @@ Both preparation notebooks ran from fresh kernels. A second run of the preparati
 
 ## 7. Target Transformation
 
-The binary target follows the Any Readmission mapping in the reference project's `config/task_A_final_labels.json`, as applied by `load_label_config()` and `load_labels()` in its `src/weka/weka_export.py`. The repository stores the mapping in [target_mapping.json](../config/target_mapping.json). The positive class, `readmitted`, includes both recorded timing categories.
+The binary target follows the reference project's Any Readmission mapping, as applied by `load_label_config()` and `load_labels()` in its `src/weka/weka_export.py`. The repository stores the mapping in [target_mapping.json](../config/target_mapping.json). The positive class, `readmitted`, includes both recorded timing categories.
 
 | Original label | Binary class | Encounters in the saved cohort |
 | --- | --- | ---: |
@@ -243,7 +243,7 @@ The manifest covers all 69,990 encounters with no repeated encounters or patient
 
 The Weka export reads the five saved CSVs and reconciles their row order, predictor values, and labels with the prepared cohort and split manifest. The model serialization follows `create_schema()`, `quote_arff()`, `arff_header()`, and `make_arff()` in the reference project's `src/weka/weka_export.py`. The final training schema follows `build_final_outputs()` in `src/weka/export_train_validation.py`. This implementation adds a full-cohort exploration ARFF, reconciles the source CSVs before writing, and records the exact categories converted to missing.
 
-Each ARFF has 33 ordered attributes with 8 numeric predictors and 24 nominal predictors before the final outcome attribute. Admission codes remain nominal. `full_prepared.arff` uses relation `diabetes_readmission_full_prepared` and the original `readmitted` domain `{NO,<30,>30}`. The five modeling files retain the reference relation name `Task_A_32_features` and use the Any Readmission domain `{not_readmitted,readmitted}` for `class`. In Weka, select `class` as the final model attribute and refer to the positive class by name, `readmitted`.
+Each ARFF has 33 ordered attributes with 8 numeric predictors and 24 nominal predictors before the final outcome attribute. Admission codes remain nominal. `full_prepared.arff` uses relation `diabetes_readmission_full_prepared` and the original `readmitted` domain `{NO,<30,>30}`. The five modeling files use relation `diabetes_readmission_32_features` with the Any Readmission domain `{not_readmitted,readmitted}` for `class`. In Weka, select `class` as the final model attribute and refer to the positive class by name, `readmitted`.
 
 | File | Rows | Predictor domains fitted on | Missing source fields | Unseen values converted to `?` |
 | --- | ---: | --- | ---: | ---: |
@@ -256,6 +256,22 @@ Each ARFF has 33 ordered attributes with 8 numeric predictors and 24 nominal pre
 
 Empty fields and source missing markers are serialized as `?`. Literal laboratory `None` and diagnosis group `Missing` are quoted nominal values. In Validation, both unseen values were `admission_source_id = 14`. That code becomes part of the Train + Validation schema. Both Test files retain the exact same 13,998 encounters in the same order. Their data sections are identical, with one `admission_source_id = 11` field and one `chlorpropamide = Down` field converted to `?` in each file. Their only header difference is the inclusion of admission-source code `14` in the final training schema. The local `outputs/preparation/arff_export_audit.json` records the conversion counts, added domain values, and output checksums.
 
-Weka 3.9.7 loaded all six files. A Java check using Weka's `Instances` API verified relation names, ordered attribute types and domains, row counts, and every parsed value against the CSVs and the applicable nominal policy. Weka also confirmed header compatibility within each modeling stage and correctly decoded a separate fixture with quotes, backslashes, punctuation, control characters, and UTF-8 text. All five model ARFFs match the reference output byte for byte.
+Weka 3.9.7 loaded all six files. A Java check using Weka's `Instances` API verified relation names, ordered attribute types and domains, row counts, and every parsed value against the CSVs and the applicable nominal policy. Weka also confirmed header compatibility within each modeling stage and correctly decoded a separate fixture with quotes, backslashes, punctuation, control characters, and UTF-8 text. The five model ARFFs preserve the reference attribute declarations and data records.
 
 [02_split_export.ipynb](../notebooks/02_split_export.ipynb) ran from a fresh kernel. A separate run from the saved cohort reproduced the four model CSVs, split manifest, six ARFFs, and ARFF audit byte for byte. Use `full_prepared.arff` for exploration, `test.arff` with the Train schema, and `test_for_train_validation.arff` with the Train + Validation schema.
+
+## 10. Final Validation
+
+The end-to-end suite ran all three preparation notebooks in fresh kernels using Python 3.13.5. Each of two independent workspaces started with the two official raw files, notebook sources, code, and configuration. The run generated 19 files. Their SHA-256 checksums were identical across both workspaces, and both raw files matched their approved checksums after processing.
+
+| Check | Verified result |
+| --- | --- |
+| Raw integrity and cleaning | Compared 101,766 encounters across 50 columns. Only the 192,852 approved marker cells changed. The cleaning audit reconciled per column, and laboratory `None` values were preserved. |
+| Cohort, diagnosis, and predictor schema | Rebuilt the lowest eligible encounter per patient independently from the cleaned CSV. All 69,990 cohort rows and ordered prepared values matched. The three diagnosis groups, numeric predictor types, original target counts, and missing-field counts reconciled with the saved data. |
+| Target and partitions | Verified the binary target on every model row and the original label counts per split. All 69,990 encounters and patients appeared exactly once across Train, Validation, and Test. Train + Validation matched the exact ordered concatenation of 55,992 rows. |
+| CSV and ARFF consistency | Checked all six ARFF headers, row counts, and decoded values against their CSV sources and fitting scopes. Verified the unseen nominal values and the output checksums in the ARFF audit. |
+| Reproducibility | Both clean runs reproduced all intermediate data, final datasets, manifests, and audits byte for byte. The 36 existing repository files included in the run's integrity check also matched their checksums before and after testing. |
+
+The full suite passed 61 tests, including the six end-to-end checks. Run it from the repository root with the project environment active using `python -m unittest discover -s tests -v`. If either official raw CSV is absent, the integration class reports a skip and the unit tests can still run. The Weka runtime check is recorded in Section 9. The byte-for-byte benchmark uses the same configuration bytes and Python version for both runs. The preparation manifest records the configuration's byte checksum and the Python version.
+
+See the [end-to-end tests](../tests/test_preparation_pipeline.py) for the checks applied to the generated files.
