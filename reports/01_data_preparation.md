@@ -187,3 +187,23 @@ The export verified the ordered schema, unique IDs, and every prepared value aga
 The CSV has SHA-256 `0207daf2cb4f83700cf71337d39519aef7c7683e910a7ba6511216e6601a787f`. The local `outputs/preparation/preparation_manifest.json` records the schema, row and label counts, per-column empty counts, cohort flow, configuration checksum, and the checksums of 6 dataset and audit files.
 
 Both preparation notebooks ran from fresh kernels. A second run of the preparation notebook from raw files in a separate directory reproduced all 6 files and the manifest byte for byte.
+
+## 7. Target Transformation
+
+The binary target follows the Any Readmission mapping in the reference project's `config/task_A_final_labels.json`, as applied by `load_label_config()` and `load_labels()` in its `src/weka/weka_export.py`. The repository stores the mapping in [target_mapping.json](../config/target_mapping.json). The positive class, `readmitted`, includes both recorded timing categories.
+
+| Original label | Binary class | Encounters in the saved cohort |
+| --- | --- | ---: |
+| `NO` | `not_readmitted` | 41,479 |
+| `<30` | `readmitted` | 6,285 |
+| `>30` | `readmitted` | 22,226 |
+| **Total** | | **69,990** |
+
+| Binary class | Encounters | Share of cohort |
+| --- | ---: | ---: |
+| `not_readmitted` | 41,479 | 59.26% |
+| `readmitted` | 28,511 | 40.74% |
+
+[02_split_export.ipynb](../notebooks/02_split_export.ipynb) reads the saved CSV, checks its checksum, schema, original label counts, and identifier uniqueness, then constructs the binary target in memory. The loader accepts LF or CRLF representations of the preparation configuration when the checksum for one representation matches the manifest. The data CSV still requires an exact byte match.
+
+The internal table has 36 columns, including both identifiers and both target representations. The model view has 33 columns, consisting of the 32 ordered predictors and `class` in the final position. Every predictor value was verified against the saved CSV across all 69,990 rows. The model view retains 1,919 empty `race` fields and 3 empty `gender` fields across 1,920 rows. The source CSV retains its original three labels and the checksum recorded in Section 6. The binary counts also match the totals across the reference Any Readmission partitions.

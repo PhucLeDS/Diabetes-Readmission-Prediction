@@ -1,6 +1,6 @@
 # Diabetes Readmission Prediction
 
-This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. The [data preparation report](reports/01_data_preparation.md) documents verified results from source checks through full prepared CSV export. Split benchmarks come from the Phase 0 source audit.
+This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. The [data preparation report](reports/01_data_preparation.md) documents verified results from source checks through binary target mapping. Split benchmarks come from the Phase 0 source audit.
 
 ## Contents
 
@@ -123,6 +123,8 @@ python -m pip install -r requirements.txt
 Download `diabetic_data.csv` and `IDS_mapping.csv` from the UCI dataset page and place them in [data/raw/](data/raw/). Direct Python dependencies are listed in [requirements.txt](requirements.txt).
 
 Run [00_data_loading.ipynb](notebooks/00_data_loading.ipynb) from a fresh kernel to verify the source checksums and inspect the schema, patient coverage, and original labels. Run [01_data_preparation.ipynb](notebooks/01_data_preparation.ipynb) to normalize the approved markers, select the cohort, and write both datasets and their column audits. The notebook then groups the three ICD-9 fields, applies the ordered predictor list, and writes `full_prepared.csv` with its feature audit and preparation manifest.
+
+Run [02_split_export.ipynb](notebooks/02_split_export.ipynb) to verify the saved cohort and inspect the Any Readmission mapping and 33-column model view. The target mapping section constructs the model view in memory.
 
 According to [.gitignore](.gitignore), data files and files in `outputs/preparation/` remain local. When cloning the repository, prepare the source data and run the workflow to regenerate the outputs.
 
