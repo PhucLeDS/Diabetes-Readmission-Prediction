@@ -1,5 +1,6 @@
 """Select one eligible encounter per patient and audit the cohort."""
 
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -156,3 +157,77 @@ def save_cohort_result(
     write_csv(cohort_path, result.columns, result.rows)
     write_csv(audit_path, AUDIT_COLUMNS, result.audit)
     return cohort_path, audit_path
+
+
+DIAGNOSIS_COLUMNS = ("diag_1", "diag_2", "diag_3")
+DIAGNOSIS_GROUP_COLUMNS = tuple(f"{column}_group" for column in DIAGNOSIS_COLUMNS)
+ICD9_GROUP_RULE_VERSION = "icd9_fixed_v1"
+ICD9_NUMERIC_GROUPS = (
+    ("Diabetes", 250, 250, ()),
+    ("Circulatory", 390, 459, (785,)),
+    ("Respiratory", 460, 519, (786,)),
+    ("Digestive", 520, 579, (787,)),
+    ("Genitourinary", 580, 629, (788,)),
+    ("Musculoskeletal", 710, 739, ()),
+    ("Injury", 800, 999, ()),
+    ("Neoplasms", 140, 239, ()),
+)
+DIAGNOSIS_GROUPS = (
+    *(name for name, _, _, _ in ICD9_NUMERIC_GROUPS),
+    "Other_numeric", "Other_V", "Other_E", "Missing", "Unmapped",
+)
+NUMERIC_ICD9 = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,2})?")
+SUPPLEMENTARY_ICD9 = re.compile(r"[VE][0-9]{1,4}(?:\.[0-9]{1,2})?")
+
+
+@dataclass
+class DiagnosisGroupingResult:
+    """Records with grouped diagnoses and counts for each diagnosis position."""
+
+    columns: tuple[str, ...]
+    rows: list[dict[str, str]]
+    group_counts: dict[str, dict[str, int]]
+
+
+def group_icd9(value: str) -> str:
+    """Apply the fixed research grouping to an ICD-9 field from the cleaned cohort."""
+    if value == "":
+        return "Missing"
+
+    code = value.strip().upper()
+    if SUPPLEMENTARY_ICD9.fullmatch(code):
+        return f"Other_{code[0]}"
+    if not NUMERIC_ICD9.fullmatch(code):
+        return "Unmapped"
+
+    number = int(code.split(".", 1)[0])
+    for group, first, last, extra_codes in ICD9_NUMERIC_GROUPS:
+        if first <= number <= last or number in extra_codes:
+            return group
+    return "Other_numeric"
+
+
+def group_diagnoses(
+    columns: Sequence[str], rows: list[dict[str, str]],
+) -> DiagnosisGroupingResult:
+    """Replace the three source diagnosis columns in place within each row's schema."""
+    validate_schema(columns, expected=ENCOUNTER_COLUMNS)
+    replacements = dict(zip(DIAGNOSIS_COLUMNS, DIAGNOSIS_GROUP_COLUMNS, strict=True))
+    output_columns = tuple(replacements.get(column, column) for column in columns)
+    counts = {column: Counter() for column in DIAGNOSIS_GROUP_COLUMNS}
+    grouped_rows = []
+    for source in rows:
+        row = dict(zip(output_columns, (source[column] for column in columns), strict=True))
+        for column, group_counts in counts.items():
+            group = row[column] = group_icd9(row[column])
+            group_counts[group] += 1
+        grouped_rows.append(row)
+
+    return DiagnosisGroupingResult(
+        columns=output_columns,
+        rows=grouped_rows,
+        group_counts={
+            column: {group: column_counts[group] for group in DIAGNOSIS_GROUPS}
+            for column, column_counts in counts.items()
+        },
+    )
