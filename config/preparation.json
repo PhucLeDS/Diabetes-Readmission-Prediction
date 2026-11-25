@@ -14,5 +14,15 @@
       "A1Cresult": "None",
       "max_glu_serum": "None"
     }
+  },
+  "cohort": {
+    "excluded_discharge_codes": [
+      "11",
+      "13",
+      "14",
+      "19",
+      "20",
+      "21"
+    ]
   }
 }

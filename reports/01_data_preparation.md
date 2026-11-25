@@ -74,3 +74,42 @@ The cleaning step reads the verified encounter table and applies the rules in [p
 The cleaned CSV was read back and checked against the source cell by cell. The comparison verified each replacement and the preservation of every other value, including encounter IDs, patient IDs, original labels, and the order of records and columns. Both source checksums matched the values recorded in Data Loading.
 
 The notebook produces `data/interim/cleaned.csv` and `outputs/preparation/cleaning_audit.csv`. The audit covers all 50 columns. Before cleaning, the reported missing rate counts the configured marker and existing empty fields. After cleaning, it counts empty fields. [01_data_preparation.ipynb](../notebooks/01_data_preparation.ipynb)
+
+## 3. Cohort Selection
+
+The selection step uses the cleaned encounter data and the discharge codes in [preparation.json](../config/preparation.json). It first excludes death and hospice encounters, then selects the eligible encounter with the smallest numeric `encounter_id` for each `patient_nbr`. The original ID breaks ties when two strings represent the same number. The output uses the same ordering rule. The source data has no encounter timestamps for establishing chronological order.
+
+| Stage | Encounters | Unique patients | Removed at this step | `NO` | `<30` | `>30` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Cleaned | 101,766 | 71,518 | 0 | 54,864 | 11,357 | 35,545 |
+| Eligible | 99,343 | 69,990 | 2,423 | 52,527 | 11,314 | 35,502 |
+| Cohort | 69,990 | 69,990 | 29,353 | 41,479 | 6,285 | 22,226 |
+
+| Excluded discharge code | Encounters removed |
+| --- | ---: |
+| `11` | 1,642 |
+| `13` | 399 |
+| `14` | 372 |
+| `19` | 8 |
+| `20` | 2 |
+| `21` | 0 |
+
+The final cohort retains 2,474 encounters with discharge code `18` (`NULL`) and 778 with code `25` (`Not Mapped`). These codes are outside the exclusion list.
+
+### Column Audit
+
+| Column | Empty in cleaned data | Empty in eligible records | Empty in cohort |
+| --- | ---: | ---: | ---: |
+| `race` | 2,273 | 2,234 | 1,919 |
+| `gender` | 3 | 3 | 3 |
+| `weight` | 98,569 | 96,218 | 67,202 |
+| `payer_code` | 40,256 | 39,398 | 30,416 |
+| `medical_specialty` | 49,949 | 48,616 | 33,654 |
+| `diag_1` | 21 | 20 | 10 |
+| `diag_2` | 358 | 356 | 293 |
+| `diag_3` | 1,423 | 1,419 | 1,224 |
+| **Total empty fields** | **192,852** | **188,264** | **134,721** |
+
+The audit records the number of empty fields and the missing rate with each stage's row count as the denominator for all 50 columns. The other 42 columns have zero empty fields in all three stages.
+
+The saved `data/interim/cohort.csv` was read back and compared with an independent selection from the cleaned CSV. All 69,990 records matched across 50 columns. Each selected encounter met the discharge policy, and each encounter ID and patient ID appears once. The notebook also writes the column audit to `outputs/preparation/cohort_audit.csv`. [01_data_preparation.ipynb](../notebooks/01_data_preparation.ipynb)
