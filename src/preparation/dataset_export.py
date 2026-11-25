@@ -17,6 +17,7 @@ from src.preparation.dataset_preparation import (
     FULL_PREPARED_PATH,
     PREPARATION_CONFIG_PATH,
     PREPARATION_MANIFEST_PATH,
+    preparation_config_checksums,
 )
 from src.validation import (
     validate_partitions,
@@ -39,13 +40,7 @@ def load_full_prepared(*, project_root: Path = PROJECT_ROOT) -> tuple[list[str],
     manifest = read_json(project_root / PREPARATION_MANIFEST_PATH.relative_to(PROJECT_ROOT))
     csv_path = project_root / data_path
     configuration = manifest["configuration"]
-    config_bytes = (project_root / config_path).read_bytes()
-    config_lf = config_bytes.replace(b"\r\n", b"\n")
-    # Git can convert the tracked configuration between LF and CRLF on checkout.
-    config_checksums = {
-        sha256(content).hexdigest()
-        for content in (config_bytes, config_lf, config_lf.replace(b"\n", b"\r\n"))
-    }
+    _, config_checksums = preparation_config_checksums(project_root / config_path)
     if (
         configuration["path"] != config_path.as_posix()
         or configuration["sha256"] not in config_checksums

@@ -1,11 +1,19 @@
 """Check the full prepared dataset contract before CSV export."""
 
+from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
+
+from src.io_utils import read_json, write_json
 
 from src.preparation.data_loading import ENCOUNTER_COLUMNS
 from src.preparation.dataset_preparation import (
+    PREPARATION_CONFIG_PATH,
     CohortResult,
     group_diagnoses,
+    save_full_prepared,
     select_predictors,
     validate_full_prepared,
 )
@@ -51,3 +59,65 @@ class FullPreparedTests(TestCase):
         self.selection.rows[1]["patient_nbr"] = "101"
         with self.assertRaisesRegex(ValueError, "Duplicate prepared patient_nbr"):
             validate_full_prepared(self.selection, self.cohort)
+
+
+    def test_export_reuses_equivalent_manifest_and_rejects_changes(self):
+        root = Path(self.enterContext(TemporaryDirectory()))
+        for relative in (
+            "data/raw/diabetic_data.csv",
+            "data/raw/IDS_mapping.csv",
+            "data/interim/cleaned.csv",
+            "data/interim/cohort.csv",
+            "outputs/preparation/cleaning_audit.csv",
+            "outputs/preparation/cohort_audit.csv",
+            "outputs/preparation/feature_audit.csv",
+        ):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+
+        config_path = root / "config/preparation.json"
+        config_path.parent.mkdir()
+        lf_config = PREPARATION_CONFIG_PATH.read_bytes().replace(b"\r\n", b"\n")
+        crlf_config = lf_config.replace(b"\n", b"\r\n")
+        config_path.write_bytes(crlf_config)
+        fixture_checksum = sha256(b"fixture").hexdigest()
+        self.enterContext(patch.multiple(
+            "src.preparation.dataset_preparation",
+            ENCOUNTER_SHA256=fixture_checksum,
+            MAPPING_SHA256=fixture_checksum,
+        ))
+
+        _, manifest_path, manifest = save_full_prepared(self.selection, self.cohort, project_root=root)
+        self.assertEqual(manifest["configuration"]["sha256"], sha256(lf_config).hexdigest())
+
+        configurations = (
+            (sha256(lf_config).hexdigest(), crlf_config),
+            (sha256(crlf_config).hexdigest(), lf_config),
+        )
+        for earlier_checksum, checkout in configurations:
+            with self.subTest(earlier_checksum=earlier_checksum):
+                manifest["configuration"]["sha256"] = earlier_checksum
+                write_json(manifest_path, manifest, overwrite=True)
+                config_path.write_bytes(checkout)
+                earlier_bytes = manifest_path.read_bytes()
+                _, _, saved = save_full_prepared(self.selection, self.cohort, project_root=root)
+                self.assertEqual(saved, manifest)
+                self.assertEqual(manifest_path.read_bytes(), earlier_bytes)
+
+        manifest["statistics"]["rows"] += 1
+        write_json(manifest_path, manifest, overwrite=True)
+        earlier_bytes = manifest_path.read_bytes()
+        with self.assertRaisesRegex(FileExistsError, "preparation_manifest"):
+            save_full_prepared(self.selection, self.cohort, project_root=root)
+        self.assertEqual(manifest_path.read_bytes(), earlier_bytes)
+
+        manifest["statistics"]["rows"] -= 1
+        write_json(manifest_path, manifest, overwrite=True)
+        earlier_bytes = manifest_path.read_bytes()
+        config = read_json(config_path)
+        config["cohort"]["excluded_discharge_codes"].remove("21")
+        write_json(config_path, config, overwrite=True)
+        with self.assertRaisesRegex(FileExistsError, "preparation_manifest"):
+            save_full_prepared(self.selection, self.cohort, project_root=root)
+        self.assertEqual(manifest_path.read_bytes(), earlier_bytes)

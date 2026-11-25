@@ -4,6 +4,7 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from platform import python_version
 
@@ -361,6 +362,19 @@ FULL_PREPARED_PATH = PROCESSED_DIR / "full_prepared.csv"
 PREPARATION_MANIFEST_PATH = PREPARATION_OUTPUT_DIR / "preparation_manifest.json"
 
 
+def preparation_config_checksums(path: Path) -> tuple[str, tuple[str, ...]]:
+    """Return the LF checksum and the accepted checksums from earlier exports."""
+    content = path.read_bytes()
+    lf_content = content.replace(b"\r\n", b"\n")
+    canonical = sha256(lf_content).hexdigest()
+    compatible = (
+        canonical,
+        sha256(lf_content.replace(b"\n", b"\r\n")).hexdigest(),
+        sha256(content).hexdigest(),
+    )
+    return canonical, compatible
+
+
 def validate_full_prepared(
     selected: FeatureSelectionResult,
     cohort: CohortResult,
@@ -414,7 +428,9 @@ def save_full_prepared(
 ) -> tuple[Path, Path, dict]:
     """Save the prepared CSV, verify the round trip, and write its manifest."""
     config_key = PREPARATION_CONFIG_PATH.relative_to(PROJECT_ROOT).as_posix()
-    statistics = validate_full_prepared(selected, cohort, config_path=project_root / config_key)
+    config_path = project_root / config_key
+    statistics = validate_full_prepared(selected, cohort, config_path=config_path)
+    config_checksum, compatible_checksums = preparation_config_checksums(config_path)
     raw_hashes = {}
     for source, expected in ((RAW_DATA_PATH, ENCOUNTER_SHA256), (IDS_MAPPING_PATH, MAPPING_SHA256)):
         key = source.relative_to(PROJECT_ROOT).as_posix()
@@ -457,7 +473,7 @@ def save_full_prepared(
             "unclear_discharge_retained": cohort.unclear_retained_by_code,
         },
         "raw_sha256": raw_hashes,
-        "configuration": {"path": config_key, "sha256": sha256_file(project_root / config_key)},
+        "configuration": {"path": config_key, "sha256": config_checksum},
         "artifact_sha256": artifact_hashes,
         "validation": {
             "ordered_schema": "passed",
@@ -469,6 +485,12 @@ def save_full_prepared(
         "runtime": {"python": python_version()},
     }
     manifest_path = project_root / PREPARATION_MANIFEST_PATH.relative_to(PROJECT_ROOT)
+    if manifest_path.is_file():
+        existing = read_json(manifest_path)
+        existing_config = existing.get("configuration") if isinstance(existing, dict) else None
+        if isinstance(existing_config, dict) and existing_config.get("sha256") in compatible_checksums:
+            # Reuse the earlier digest only when the protected write matches the entire manifest.
+            manifest["configuration"]["sha256"] = existing_config["sha256"]
     write_json(manifest_path, manifest)
     return csv_path, manifest_path, manifest
 

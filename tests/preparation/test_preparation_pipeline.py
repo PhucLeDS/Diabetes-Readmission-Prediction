@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 from collections import Counter
+from hashlib import sha256
 from itertools import chain
 from pathlib import Path
 from shutil import copyfile, copytree, ignore_patterns
@@ -74,11 +75,14 @@ async def _execute_notebooks(root: Path) -> None:
             raise AssertionError(f"{filename} contains a code cell that did not run.")
 
 
-def _prepare_workspace(root: Path) -> None:
+def _prepare_workspace(root: Path, *, crlf_config: bool = False) -> None:
     """Copy only execution inputs and run the notebook entry points."""
     for directory in ("src", "config", "notebooks"):
         copytree(PROJECT_ROOT / directory, root / directory, ignore=ignore_patterns("__pycache__", ".ipynb_checkpoints"))
     copyfile(PROJECT_ROOT / "requirements.txt", root / "requirements.txt")
+    config_path = root / "config/preparation.json"
+    config_bytes = config_path.read_bytes().replace(b"\r\n", b"\n")
+    config_path.write_bytes(config_bytes.replace(b"\n", b"\r\n") if crlf_config else config_bytes)
     (root / "data/raw").mkdir(parents=True)
     for path in RAW_HASHES:
         copyfile(PROJECT_ROOT / path, root / path)
@@ -118,7 +122,8 @@ class PreparationPipelineTests(TestCase):
 
         manifest = read_json(self.root / "outputs/preparation/preparation_manifest.json")
         self.assertEqual(manifest["raw_sha256"], RAW_HASHES)
-        self.assertEqual(manifest["configuration"]["sha256"], sha256_file(self.root / "config/preparation.json"))
+        config_bytes = (self.root / "config/preparation.json").read_bytes().replace(b"\r\n", b"\n")
+        self.assertEqual(manifest["configuration"]["sha256"], sha256(config_bytes).hexdigest())
         self.assertEqual(set(manifest["artifact_sha256"]), {
             "data/interim/cleaned.csv", "data/interim/cohort.csv", "data/processed/full_prepared.csv",
             "outputs/preparation/cleaning_audit.csv", "outputs/preparation/cohort_audit.csv",
@@ -293,7 +298,7 @@ class PreparationPipelineTests(TestCase):
 
     def test_second_clean_notebook_run_reproduces_all_outputs(self):
         replay = self.workspace / "replay"
-        _prepare_workspace(replay)
+        _prepare_workspace(replay, crlf_config=True)
         self.assertEqual(_output_hashes(replay), self.hashes)
         for path, expected in RAW_HASHES.items():
             self.assertEqual(sha256_file(replay / path), expected)
