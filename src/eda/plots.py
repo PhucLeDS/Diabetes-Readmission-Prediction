@@ -11,6 +11,7 @@ import pandas as pd
 from src.eda.data import ADMISSION_COLUMNS
 from src.eda.descriptive import PRIOR_VISIT_COLUMNS
 from src.eda.nominal import DEMOGRAPHIC_COLUMNS, MEDICATION_FLAG_COLUMNS, NominalProfile
+from src.eda.relationships import STAY_COLUMN, STAY_SERVICE_COLUMNS, RelationshipProfile
 from src.preparation.dataset_preparation import DIAGNOSIS_GROUP_COLUMNS
 
 
@@ -177,4 +178,56 @@ def plot_nominal_distributions(profile: NominalProfile) -> dict[str, Figure]:
         "laboratory_result_distributions": lab,
         "medication_distributions": medications,
         "diagnosis_group_distributions": diagnoses,
+    }
+
+
+
+def plot_relationships(profile: RelationshipProfile) -> dict[str, Figure]:
+    """Plot stay summaries, prior visit proportions, and outcome totals."""
+    cohort_size = int(profile.outcome_distribution["cohort_size"].iloc[0])
+    scope = f"Full prepared cohort (N = {cohort_size:,})"
+    with plt.rc_context({"axes.spines.top": False, "axes.spines.right": False}):
+        stays, axes = plt.subplots(1, 3, figsize=(12, 4.3), layout="constrained")
+        stays.suptitle(f"Services by Length of Stay | {scope}")
+        for ax, measure in zip(axes, STAY_SERVICE_COLUMNS, strict=True):
+            rows = profile.stay_service_summary.loc[profile.stay_service_summary["measure"].eq(measure)]
+            observed = rows.loc[rows[STAY_COLUMN].notna()]
+            days = observed[STAY_COLUMN].to_numpy(dtype=float)
+            median = observed["median"].to_numpy(dtype=float, na_value=np.nan)
+            q1 = observed["q1"].to_numpy(dtype=float, na_value=np.nan)
+            q3 = observed["q3"].to_numpy(dtype=float, na_value=np.nan)
+            ax.fill_between(days, q1, q3, color=BAR_COLOR, alpha=0.17, label="Q1 to Q3")
+            ax.plot(days, median, marker="o", markersize=3, linewidth=1.5, color=BAR_COLOR, label="Median")
+            title, unit = ENCOUNTER_MEASURES[measure]
+            ax.set(title=title, xlabel="Days in hospital", ylabel=unit)
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
+            ax.legend(loc="best", fontsize=8)
+
+        visits, ax = plt.subplots(figsize=(10, 4.8), layout="constrained")
+        visits.suptitle(f"Recorded Prior Visits by Age Band | {scope}")
+        age_labels = profile.age_prior_visits["age"].drop_duplicates().replace("", "(Empty field)")
+        positions = np.arange(len(age_labels))
+        for service, color in zip(PRIOR_VISIT_COLUMNS, (BAR_COLOR, "#9a6336", "#35816f"), strict=True):
+            rates = profile.age_prior_visits.loc[
+                profile.age_prior_visits["service"].eq(service), "percent_of_age_group"
+            ]
+            ax.plot(positions, rates, marker="o", linewidth=1.6, label=PRIOR_VISIT_LABELS[service], color=color)
+        ax.set_xticks(positions, labels=age_labels, rotation=30, ha="right")
+        ax.set(xlabel="Age band (years)", ylabel="Patients with 1+ visits (% of age band)", ylim=(0, None))
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(axis="y", alpha=0.22)
+
+        outcome, axes = plt.subplots(1, 2, figsize=(11, 4.2), layout="constrained")
+        outcome.suptitle(f"Recorded Readmission Labels | {scope}")
+        for ax, representation in zip(axes, ("Original", "Any Readmission"), strict=True):
+            rows = profile.outcome_distribution.loc[
+                profile.outcome_distribution["representation"].eq(representation)
+            ]
+            _plot_category_counts(ax, rows, labels=rows["label"], title=representation)
+            ax.set_xlim(0, cohort_size)
+
+    return {
+        "stay_service_distributions": stays,
+        "age_prior_visit_distributions": visits,
+        "outcome_distributions": outcome,
     }
