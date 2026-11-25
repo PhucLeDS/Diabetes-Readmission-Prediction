@@ -56,16 +56,15 @@ class _LfCsvStream:
 
 
 @contextmanager
-def _output_stream(path: Path, *, overwrite: bool) -> Iterator[TextIO]:
+def _temporary_output(path: Path, *, overwrite: bool) -> Iterator[Path]:
     ensure_directory(path.parent)
     temporary_path = None
     try:
         with NamedTemporaryFile(
-            mode="w", encoding="utf-8", newline="", dir=path.parent,
-            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False,
         ) as stream:
             temporary_path = Path(stream.name)
-            yield stream
+        yield temporary_path
 
         if overwrite:
             temporary_path.replace(path)
@@ -82,6 +81,13 @@ def _output_stream(path: Path, *, overwrite: bool) -> Iterator[TextIO]:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+@contextmanager
+def _output_stream(path: Path, *, overwrite: bool) -> Iterator[TextIO]:
+    with _temporary_output(path, overwrite=overwrite) as temporary_path:
+        with temporary_path.open("w", encoding="utf-8", newline="") as stream:
+            yield stream
 
 
 def write_csv(
@@ -123,4 +129,11 @@ def write_text(path: Path, data: str, *, overwrite: bool = False) -> Path:
     """Write UTF-8 text with the supplied line endings and protected overwrite behavior."""
     with _output_stream(path, overwrite=overwrite) as stream:
         stream.write(data)
+    return path
+
+
+def write_bytes(path: Path, data: bytes, *, overwrite: bool = False) -> Path:
+    """Publish bytes using the same overwrite protection as the text writers."""
+    with _temporary_output(path, overwrite=overwrite) as temporary_path:
+        temporary_path.write_bytes(data)
     return path
