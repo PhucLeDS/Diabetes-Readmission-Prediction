@@ -1,6 +1,6 @@
 # Diabetes Readmission Prediction
 
-This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. The [data preparation report](reports/01_data_preparation.md) documents verified source, cleaning, cohort, and diagnosis grouping results. Split benchmarks come from the Phase 0 source audit.
+This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. The [data preparation report](reports/01_data_preparation.md) documents verified source, cleaning, cohort, diagnosis grouping, and predictor selection results. Split benchmarks come from the Phase 0 source audit.
 
 ## Contents
 
@@ -45,7 +45,7 @@ The preparation workflow validates source data, normalizes missing values, selec
 
 Cohort selection excludes encounters with the specified discharge codes related to death or hospice. For each patient, it then selects the eligible encounter with the smallest numeric `encounter_id`. This ID identifies the representative record. The source data does not contain timestamps that establish chronological encounter order.
 
-The full prepared dataset retains two identifiers, 32 predictors, and the original `readmitted` label. The predictor set contains 8 numeric and 24 nominal attributes. It is a selected baseline that will be assessed through model experiments.
+The full prepared dataset retains two identifiers, 32 predictors, and the original `readmitted` label. The predictor set contains 8 numeric and 24 nominal attributes. It is a selected baseline that will be assessed through model experiments. The selection step was verified on 69,990 encounters and left 1,922 empty fields across `race` and `gender`.
 
 The full dataset is stratified by the three original labels using seed `42`, then divided into train, validation, and test sets at approximately 64% / 16% / 20%. Each model dataset contains 32 predictors and `class`.
 
@@ -122,7 +122,7 @@ python -m pip install -r requirements.txt
 
 Download `diabetic_data.csv` and `IDS_mapping.csv` from the UCI dataset page and place them in [data/raw/](data/raw/). Direct Python dependencies are listed in [requirements.txt](requirements.txt).
 
-Run [00_data_loading.ipynb](notebooks/00_data_loading.ipynb) from a fresh kernel to verify the source checksums and inspect the schema, patient coverage, and original labels. Run [01_data_preparation.ipynb](notebooks/01_data_preparation.ipynb) to normalize the approved markers, select the cohort, and write both datasets and their column audits. The notebook then replaces the three ICD-9 fields with grouped diagnoses and summarizes their distributions.
+Run [00_data_loading.ipynb](notebooks/00_data_loading.ipynb) from a fresh kernel to verify the source checksums and inspect the schema, patient coverage, and original labels. Run [01_data_preparation.ipynb](notebooks/01_data_preparation.ipynb) to normalize the approved markers, select the cohort, and write both datasets and their column audits. The notebook then groups the three ICD-9 fields, applies the ordered predictor list, and writes the feature audit.
 
 According to [.gitignore](.gitignore), data files and files in `outputs/preparation/` remain local. When cloning the repository, prepare the source data and run the workflow to regenerate the outputs.
 

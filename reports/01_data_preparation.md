@@ -138,3 +138,30 @@ The fixed ICD-9 grouping rule `icd9_fixed_v1` replaces `diag_1`, `diag_2`, and `
 Before grouping, the three source columns contained 694, 723, and 756 distinct nonempty codes, respectively. Each grouped column has 11 observed code groups and the `Missing` category. Its `Missing` count matches the corresponding source column's empty-field count.
 
 The notebook produced 69,990 rows and 50 columns after grouping. Comparison with `cohort.csv` verified the other 47 fields on every row, including both IDs and the original target. The notebook holds the transformed table in memory for predictor selection. [01_data_preparation.ipynb](../notebooks/01_data_preparation.ipynb)
+
+## 5. Feature Selection
+
+The selection step applies the ordered baseline in [preparation.json](../config/preparation.json). It keeps `encounter_id` and `patient_nbr` first, the 32 predictors in the configured order, and the original `readmitted` target last. The predictors include 8 numeric encounter and utilization counts and 24 nominal attributes covering demographics, admission details, laboratory results, medications, and grouped diagnoses.
+
+| Decision | Columns | Reason |
+| --- | --- | --- |
+| Drop source columns | `weight`, `payer_code`, `medical_specialty` | The reference training set showed 96.05%, 43.59%, and 47.96% missing, respectively. |
+| Drop source columns | `examide`, `citoglipton`, `troglitazone`, `glimepiride-pioglitazone` | Each contained only `No` in the reference training set. |
+| Drop source columns | `acetohexamide`, `tolbutamide`, `miglitol`, `tolazamide`, `glipizide-metformin`, `metformin-rosiglitazone`, `metformin-pioglitazone` | Each had between 1 and 18 values other than `No` in the reference training set. |
+| Drop source column | `discharge_disposition_id` | Used to determine cohort eligibility. Its availability at the intended prediction point remains unverified. |
+| Replace source diagnoses during grouping | `diag_1`, `diag_2`, `diag_3` | The baseline retains their grouped counterparts. |
+| Omit derived columns | `total_prior_visits`, `has_prior_inpatient`, `A1C_tested`, `glucose_tested`, `admission_type_desc`, `admission_source_desc`, `discharge_disposition_desc` | The pipeline uses the original visit counts, laboratory categories, and admission or discharge codes at their relevant steps. |
+
+The 15 source columns are dropped from the already grouped schema. The audit also records the 3 earlier diagnosis replacements and the 7 derived columns that the pipeline omits. The baseline uses the recorded training-set evidence and the agreed policy. Its predictive value still needs evaluation, and the available records do not establish the full history of feature selection decisions.
+
+### Verified Output
+
+| Measure | Grouped cohort | Selected table |
+| --- | ---: | ---: |
+| Encounters | 69,990 | 69,990 |
+| Columns | 50 | 35 |
+| Empty fields | 133,194 | 1,922 |
+
+All retained values were checked against the grouped cohort. The original labels remain `NO` (41,479), `<30` (6,285), and `>30` (22,226). The selected table contains 1,919 empty `race` fields and 3 empty `gender` fields across 1,920 encounters. The reduction in empty fields comes from column removal.
+
+The notebook writes `outputs/preparation/feature_audit.csv` with 60 entries. It records output positions, column roles, and before-and-after missingness where the column exists. The selected table is held in memory for the next step, which writes the full prepared CSV. [01_data_preparation.ipynb](../notebooks/01_data_preparation.ipynb)

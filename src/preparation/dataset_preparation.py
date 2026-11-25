@@ -8,8 +8,8 @@ from pathlib import Path
 
 from src.io_utils import CsvValue, read_json, write_csv
 from src.paths import CONFIG_DIR, INTERIM_DIR, PREPARATION_OUTPUT_DIR
-from src.preparation.data_loading import ENCOUNTER_COLUMNS, TARGET_COLUMN, TARGET_LABELS, RawTable
-from src.validation import validate_schema, validate_target, validate_unique_ids
+from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, ID_COLUMNS, TARGET_COLUMN, TARGET_LABELS, RawTable
+from src.validation import validate_required_columns, validate_schema, validate_target, validate_unique_ids
 
 
 COHORT_DATA_PATH = INTERIM_DIR / "cohort.csv"
@@ -161,6 +161,9 @@ def save_cohort_result(
 
 DIAGNOSIS_COLUMNS = ("diag_1", "diag_2", "diag_3")
 DIAGNOSIS_GROUP_COLUMNS = tuple(f"{column}_group" for column in DIAGNOSIS_COLUMNS)
+GROUPED_ENCOUNTER_COLUMNS = tuple(
+    f"{column}_group" if column in DIAGNOSIS_COLUMNS else column for column in ENCOUNTER_COLUMNS
+)
 ICD9_GROUP_RULE_VERSION = "icd9_fixed_v1"
 ICD9_NUMERIC_GROUPS = (
     ("Diabetes", 250, 250, ()),
@@ -212,8 +215,7 @@ def group_diagnoses(
 ) -> DiagnosisGroupingResult:
     """Replace the three source diagnosis columns in place within each row's schema."""
     validate_schema(columns, expected=ENCOUNTER_COLUMNS)
-    replacements = dict(zip(DIAGNOSIS_COLUMNS, DIAGNOSIS_GROUP_COLUMNS, strict=True))
-    output_columns = tuple(replacements.get(column, column) for column in columns)
+    output_columns = GROUPED_ENCOUNTER_COLUMNS
     counts = {column: Counter() for column in DIAGNOSIS_GROUP_COLUMNS}
     grouped_rows = []
     for source in rows:
@@ -231,3 +233,117 @@ def group_diagnoses(
             for column, column_counts in counts.items()
         },
     )
+
+
+FEATURE_AUDIT_PATH = PREPARATION_OUTPUT_DIR / "feature_audit.csv"
+FEATURE_AUDIT_COLUMNS = (
+    "column", "action", "logical_type", "input_stage", "reason", "output_column",
+    "output_position", "rows_before", "rows_after", "empty_before", "empty_after",
+    "missing_rate_before", "missing_rate_after",
+)
+
+
+@dataclass
+class FeatureSelectionResult:
+    """The ordered prepared schema, its records, and feature selection audit."""
+
+    columns: tuple[str, ...]
+    rows: list[dict[str, str]]
+    audit: list[dict[str, CsvValue]]
+
+
+def select_predictors(
+    grouped: DiagnosisGroupingResult, *, config_path: Path = PREPARATION_CONFIG_PATH,
+) -> FeatureSelectionResult:
+    """Project the grouped encounters onto the configured baseline schema."""
+    validate_schema(grouped.columns, expected=GROUPED_ENCOUNTER_COLUMNS)
+    policy = read_json(config_path)["feature_selection"]
+    predictors = policy["predictors"]
+    drops = policy["dropped_source_columns"]
+    not_created = policy["not_created_columns"]
+    if not isinstance(predictors, list) or len(predictors) != 32 or not all(
+        isinstance(name, str) for name in predictors
+    ):
+        raise ValueError("Expected an ordered list of 32 predictor names.")
+    columns = (*ID_COLUMNS, *predictors, TARGET_COLUMN)
+    validate_schema(columns)
+    validate_required_columns(predictors, DIAGNOSIS_GROUP_COLUMNS)
+    if not isinstance(drops, dict) or not isinstance(not_created, dict):
+        raise ValueError("Expected name-to-reason mappings for dropped and uncreated columns.")
+    selected_columns = set(columns)
+    if drops.keys() & selected_columns or selected_columns | drops.keys() != set(grouped.columns):
+        raise ValueError("Output and dropped columns must account for the grouped schema without overlap.")
+    if set(not_created) & (set(ENCOUNTER_COLUMNS) | set(grouped.columns)):
+        raise ValueError("A column declared as not created is present in the source or grouped schema.")
+    if any(not isinstance(reason, str) or not reason.strip() for reason in (*drops.values(), *not_created.values())):
+        raise ValueError("Each dropped or not created column needs a reason.")
+
+    rows = [{column: row[column] for column in columns} for row in grouped.rows]
+    audit = _feature_audit(grouped, columns, drops, not_created)
+    return FeatureSelectionResult(columns=columns, rows=rows, audit=audit)
+
+
+def _feature_audit(
+    grouped: DiagnosisGroupingResult,
+    columns: tuple[str, ...],
+    drops: dict[str, str],
+    not_created: dict[str, str],
+) -> list[dict[str, CsvValue]]:
+    row_count = len(grouped.rows)
+    positions = {column: index for index, column in enumerate(columns, start=1)}
+    empty = Counter(column for row in grouped.rows for column, value in row.items() if value == "")
+    audit: list[dict[str, CsvValue]] = []
+
+    def add(
+        column: str, action: str, logical_type: str, reason: str, *,
+        input_stage: str = "grouped_cohort", empty_before: int | None = None,
+        replacement: str = "",
+    ) -> None:
+        output_position = positions.get(column)
+        present = output_position is not None
+        before_rate = empty_before / row_count if row_count and empty_before is not None else None
+        audit.append({
+            "column": column,
+            "action": action,
+            "logical_type": logical_type,
+            "input_stage": input_stage,
+            "reason": reason,
+            "output_column": column if present else replacement,
+            "output_position": output_position,
+            "rows_before": row_count if input_stage else None,
+            "rows_after": row_count if present else None,
+            "empty_before": empty_before,
+            "empty_after": empty_before if present else None,
+            "missing_rate_before": before_rate,
+            "missing_rate_after": before_rate if present else None,
+        })
+
+    for column in grouped.columns:
+        if column in ID_COLUMNS:
+            action, logical_type, reason = "retain_identifier", "identifier", "Integrity checks and split tracking."
+        elif column == TARGET_COLUMN:
+            action, logical_type, reason = "retain_target", "target", "Preserve the original three labels."
+        elif column in drops:
+            action, logical_type, reason = "drop_source", "nominal", drops[column]
+        else:
+            action = "retain_predictor"
+            logical_type = "numeric" if column in COUNT_COLUMNS else "nominal"
+            reason = "Included in the approved baseline."
+        add(column, action, logical_type, reason, empty_before=empty[column])
+
+    for source, replacement in zip(DIAGNOSIS_COLUMNS, DIAGNOSIS_GROUP_COLUMNS, strict=True):
+        add(
+            source, "replaced_diagnosis", "nominal", "Replaced by the fixed ICD-9 grouping.",
+            input_stage="cohort", empty_before=grouped.group_counts[replacement]["Missing"],
+            replacement=replacement,
+        )
+    for column, reason in not_created.items():
+        add(column, "not_created", "", reason, input_stage="")
+    return audit
+
+
+def save_feature_audit(
+    result: FeatureSelectionResult, *, audit_path: Path = FEATURE_AUDIT_PATH,
+) -> Path:
+    """Write the column decisions, positions, and missingness for this selection."""
+    return write_csv(audit_path, FEATURE_AUDIT_COLUMNS, result.audit)
