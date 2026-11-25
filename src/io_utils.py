@@ -117,3 +117,10 @@ def write_json(path: Path, data: object, *, overwrite: bool = False) -> Path:
         json.dump(data, stream, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
         stream.write("\n")
     return path
+
+
+def write_text(path: Path, data: str, *, overwrite: bool = False) -> Path:
+    """Write UTF-8 text with the supplied line endings and protected overwrite behavior."""
+    with _output_stream(path, overwrite=overwrite) as stream:
+        stream.write(data)
+    return path

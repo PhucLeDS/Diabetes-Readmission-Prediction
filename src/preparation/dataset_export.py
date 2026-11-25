@@ -1,15 +1,18 @@
 """Construct the binary modeling view and export reproducible cohort partitions."""
 
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from fractions import Fraction
 from hashlib import sha256
-from math import floor
+from io import StringIO
+from math import floor, isfinite
 from pathlib import Path
 
-from src.io_utils import read_csv, read_json, sha256_file, write_csv
-from src.paths import PREPARATION_OUTPUT_DIR, PROCESSED_DIR, PROJECT_ROOT
-from src.preparation.data_loading import ID_COLUMNS, TARGET_COLUMN, TARGET_LABELS
+from src.io_utils import read_csv, read_json, sha256_file, write_csv, write_json, write_text
+from src.paths import PREPARATION_OUTPUT_DIR, PROCESSED_DIR, PROJECT_ROOT, WEKA_DIR
+from src.preparation.data_loading import COUNT_COLUMNS, ID_COLUMNS, TARGET_COLUMN, TARGET_LABELS
 from src.preparation.dataset_preparation import (
     FULL_PREPARED_PATH,
     PREPARATION_CONFIG_PATH,
@@ -292,3 +295,277 @@ def save_model_partitions(
         if reloaded != records:
             raise ValueError(f"CSV round trip changed partition data: {path}")
     return summaries
+
+
+MODEL_ARFF_RELATION = "Task_A_32_features"
+FULL_ARFF_RELATION = "diabetes_readmission_full_prepared"
+ARFF_AUDIT_PATH = PREPARATION_OUTPUT_DIR / "arff_export_audit.json"
+ARFF_MISSING_VALUES = frozenset(("", "?"))
+_ARFF_ESCAPES = {
+    "\\": "\\\\", "'": "\\'", '"': '\\"', "%": "\\%",
+    "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f",
+}
+_ARFF_UNESCAPES = {escaped[1]: value for value, escaped in _ARFF_ESCAPES.items()}
+_ARFF_ESCAPE_PATTERN = re.compile(r"\\(.)")
+_ARFF_NUMERIC = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_ARFF_FIELD = re.compile(r"(?:'(?P<nominal>(?:[^'\\\r\n]|\\.)*)'|(?P<plain>[^,'\r\n]+))(?P<separator>,|$)")
+
+
+@dataclass(frozen=True)
+class ArffAttribute:
+    """An ordered ARFF attribute with a fixed nominal domain or a numeric type."""
+
+    name: str
+    domain: tuple[str, ...] | None = None
+
+
+def create_arff_schema(
+    predictors: Sequence[str],
+    training_rows: Sequence[Mapping[str, str]],
+    *,
+    target: str,
+    target_values: tuple[str, ...],
+) -> tuple[ArffAttribute, ...]:
+    """Fit predictor domains from the supplied rows and append the fixed target domain."""
+    validate_schema((*predictors, target))
+    if not training_rows:
+        raise ValueError("ARFF schema requires at least one fitting row.")
+    schema = []
+    for name in predictors:
+        if name in COUNT_COLUMNS:
+            schema.append(ArffAttribute(name))
+        else:
+            values = {row[name] for row in training_rows}.difference(ARFF_MISSING_VALUES)
+            if not values:
+                raise ValueError(f"{name!r} has no observed values for its nominal ARFF domain.")
+            schema.append(ArffAttribute(name, tuple(sorted(values))))
+    schema.append(ArffAttribute(target, target_values))
+    return tuple(schema)
+
+
+def quote_arff(value: str) -> str:
+    """Quote an ARFF literal and escape Weka's special characters."""
+    if "\x00" in value:
+        raise ValueError("ARFF literals cannot contain NUL.")
+    return "'" + "".join(_ARFF_ESCAPES.get(char, char) for char in value) + "'"
+
+
+def arff_header(relation: str, schema: Sequence[ArffAttribute]) -> str:
+    """Serialize an ordered schema using Weka's dense ARFF syntax."""
+    lines = [f"@RELATION {quote_arff(relation)}", ""]
+    for attribute in schema:
+        kind = "NUMERIC"
+        if attribute.domain is not None:
+            kind = "{" + ",".join(quote_arff(value) for value in attribute.domain) + "}"
+        lines.append(f"@ATTRIBUTE {quote_arff(attribute.name)} {kind}")
+    return "\n".join(lines) + "\n\n@DATA\n"
+
+
+def make_arff(
+    relation: str,
+    schema: Sequence[ArffAttribute],
+    rows: Sequence[Mapping[str, str]],
+    *,
+    allow_unseen: bool = False,
+) -> tuple[str, dict]:
+    """Serialize rows and distinguish source missing values from unseen categories."""
+    columns = [attribute.name for attribute in schema]
+    target = columns[-1]
+    domains = {
+        attribute.name: set(attribute.domain)
+        for attribute in schema if attribute.domain is not None
+    }
+    nominal_tokens = {
+        name: {value: quote_arff(value) for value in domain}
+        for name, domain in domains.items()
+    }
+    original_missing: Counter[str] = Counter()
+    unseen: Counter[str] = Counter()
+    unseen_values: dict[str, Counter[str]] = {}
+    with StringIO(newline="") as stream:
+        stream.write(arff_header(relation, schema))
+        for number, row in enumerate(rows, start=1):
+            encoded = []
+            for name in columns:
+                value = row[name]
+                if name == target and value not in domains[target]:
+                    raise ValueError(f"Invalid ARFF target {value!r} in row {number}.")
+                if value in ARFF_MISSING_VALUES:
+                    original_missing[name] += 1
+                    encoded.append("?")
+                elif name not in domains:
+                    if _ARFF_NUMERIC.fullmatch(value) is None or not isfinite(float(value)):
+                        raise ValueError(f"Invalid numeric value for {name!r} in ARFF row {number}: {value!r}.")
+                    encoded.append(value)
+                elif value in domains[name]:
+                    encoded.append(nominal_tokens[name][value])
+                elif allow_unseen:
+                    unseen[name] += 1
+                    unseen_values.setdefault(name, Counter())[value] += 1
+                    encoded.append("?")
+                else:
+                    raise ValueError(f"Unseen value for {name!r} in ARFF row {number}: {value!r}.")
+            stream.write(",".join(encoded) + "\n")
+        content = stream.getvalue()
+    return content, {
+        "rows": len(rows),
+        "attributes": len(columns),
+        "source_missing_by_column": dict(original_missing),
+        "unseen_nominal_to_arff_missing": dict(unseen),
+        "unseen_nominal_values_by_column": {name: dict(counts) for name, counts in unseen_values.items()},
+        "arff_missing_by_column": dict(original_missing + unseen),
+    }
+
+
+def _read_arff_row(line: str) -> list[tuple[bool, str] | None]:
+    """Decode one generated dense row, tracking quoted values and structural commas."""
+    position = 0
+    fields = []
+    while position < len(line):
+        field = _ARFF_FIELD.match(line, position)
+        if field is None:
+            raise ValueError("Invalid quoting or field syntax in generated ARFF.")
+        nominal, plain, separator = field.groups()
+        if nominal is not None:
+            try:
+                value = (True, nominal)
+                if "\\" in nominal:
+                    decoded = _ARFF_ESCAPE_PATTERN.sub(lambda match: _ARFF_UNESCAPES[match[1]], nominal)
+                    value = (True, decoded)
+            except KeyError as error:
+                raise ValueError("Unknown escape in generated ARFF.") from error
+        elif plain == "?":
+            value = None
+        elif _ARFF_NUMERIC.fullmatch(plain) is not None:
+            value = (False, plain)
+        else:
+            raise ValueError("Expected a quoted nominal value, a number, or missing marker in ARFF.")
+        fields.append(value)
+        position = field.end()
+        if separator == "," and position == len(line):
+            raise ValueError("Trailing field separator in generated ARFF.")
+    return fields
+
+
+def validate_arff(
+    content: str,
+    relation: str,
+    schema: Sequence[ArffAttribute],
+    rows: Sequence[Mapping[str, str]],
+    *,
+    allow_unseen: bool = False,
+) -> None:
+    """Decode generated ARFF and check its header and values against source rows."""
+    header = arff_header(relation, schema)
+    if not content.startswith(header):
+        raise ValueError("ARFF relation or ordered attribute schema differs.")
+    domains = [None if attr.domain is None else set(attr.domain) for attr in schema]
+    names = [attr.name for attr in schema]
+    with StringIO(content, newline="\n") as stream:
+        stream.seek(len(header))
+        for number, (line, row) in enumerate(zip(stream, rows, strict=True), start=1):
+            expected = []
+            for name, domain in zip(names, domains, strict=True):
+                value = row[name]
+                if name == names[-1] and value not in domain:
+                    raise ValueError(f"Invalid ARFF target in row {number}.")
+                if value in ARFF_MISSING_VALUES or (allow_unseen and domain is not None and value not in domain):
+                    expected.append(None)
+                else:
+                    if domain is not None and value not in domain:
+                        raise ValueError(f"ARFF nominal value outside the declared domain in row {number}.")
+                    expected.append((domain is not None, value))
+            if _read_arff_row(line.removesuffix("\n")) != expected:
+                raise ValueError(f"ARFF values differ from source in row {number}.")
+
+
+def _verified_arff_source_splits(
+    project_root: Path, prepared_rows: list[dict[str, str]],
+) -> dict[str, list[dict[str, str]]]:
+    """Reconcile the saved membership manifest with the deterministic cohort split."""
+    assignments = make_split_assignments(
+        prepared_rows, config_path=project_root / SPLIT_CONFIG_PATH.relative_to(PROJECT_ROOT),
+    )
+    _, manifest = read_csv(
+        project_root / SPLIT_MANIFEST_PATH.relative_to(PROJECT_ROOT),
+        expected_columns=SPLIT_MANIFEST_COLUMNS,
+    )
+    encounter, patient = ID_COLUMNS
+    partitions: dict[str, list[dict[str, str]]] = {name: [] for name in SPLIT_NAMES}
+    ordered = sorted(prepared_rows, key=lambda row: (int(row[encounter]), row[encounter]))
+    for row, membership in zip(ordered, manifest, strict=True):
+        split = assignments[row[encounter]]
+        if membership != {encounter: row[encounter], patient: row[patient], "split": split}:
+            raise ValueError("Split manifest differs from the saved cohort or deterministic assignments.")
+        partitions[split].append(row)
+    return partitions
+
+
+def save_weka_datasets(*, project_root: Path = PROJECT_ROOT) -> dict:
+    """Write six validated ARFF datasets and their per-file conversion audit."""
+    prepared_columns, prepared_rows = load_full_prepared(project_root=project_root)
+    predictors = prepared_columns[2:-1]
+    if not set(COUNT_COLUMNS).issubset(predictors):
+        raise ValueError("The prepared data must include all configured numeric predictors.")
+    partitions = _verified_arff_source_splits(project_root, prepared_rows)
+    partitions["train_validation"] = partitions["train"] + partitions["validation"]
+    model_columns = [*predictors, CLASS_COLUMN]
+    mapping = load_target_mapping(project_root / TARGET_MAPPING_CONFIG_PATH.relative_to(PROJECT_ROOT))
+    processed_dir = project_root / PROCESSED_DIR.relative_to(PROJECT_ROOT)
+    weka_dir = project_root / WEKA_DIR.relative_to(PROJECT_ROOT)
+    audit_path = project_root / ARFF_AUDIT_PATH.relative_to(PROJECT_ROOT)
+    artifacts = {}
+    audit = {"datasets": {}}
+
+    full_schema = create_arff_schema(predictors, prepared_rows, target=TARGET_COLUMN, target_values=TARGET_LABELS)
+    content, summary = make_arff(FULL_ARFF_RELATION, full_schema, prepared_rows)
+    validate_arff(content, FULL_ARFF_RELATION, full_schema, prepared_rows)
+    artifacts[weka_dir / "full_prepared.arff"] = content
+    audit["datasets"]["full_prepared"] = {**summary, "schema_source": "full_prepared"}
+    fitted_schemas = {}
+
+    for name, schema_source in (
+        ("train", "train"), ("validation", "train"), ("test", "train"),
+        ("train_validation", "train_validation"), ("test_for_train_validation", "train_validation"),
+    ):
+        csv_name = "test" if name == "test_for_train_validation" else name
+        _, rows = read_csv(processed_dir / f"{csv_name}.csv", expected_columns=model_columns)
+        for number, (source, exported) in enumerate(zip(partitions[csv_name], rows, strict=True), start=1):
+            if (
+                exported[CLASS_COLUMN] != mapping[source[TARGET_COLUMN]]
+                or any(exported[column] != source[column] for column in predictors)
+            ):
+                raise ValueError(f"{csv_name}.csv differs from the assigned cohort at row {number}.")
+
+        if name == schema_source:
+            fitted_schemas[name] = create_arff_schema(
+                predictors, rows, target=CLASS_COLUMN, target_values=CLASS_LABELS,
+            )
+        schema = fitted_schemas[schema_source]
+        allow_unseen = name != schema_source
+        content, summary = make_arff(MODEL_ARFF_RELATION, schema, rows, allow_unseen=allow_unseen)
+        validate_arff(content, MODEL_ARFF_RELATION, schema, rows, allow_unseen=allow_unseen)
+        artifacts[weka_dir / f"{name}.arff"] = content
+        audit["datasets"][name] = {**summary, "schema_source": schema_source}
+
+    audit["domains_added_in_final_schema"] = {
+        final.name: sorted(set(final.domain).difference(development.domain))
+        for development, final in zip(fitted_schemas["train"], fitted_schemas["train_validation"], strict=True)
+        if final.domain != development.domain
+    }
+    for path, content in artifacts.items():
+        encoded = content.encode("utf-8")
+        if path.exists() and path.read_bytes() != encoded:
+            raise FileExistsError(f"Existing output differs: {path}")
+        audit["datasets"][path.stem]["sha256"] = sha256(encoded).hexdigest()
+    if audit_path.exists():
+        write_json(audit_path, audit)
+
+    for path, content in artifacts.items():
+        write_text(path, content)
+        if sha256_file(path) != audit["datasets"][path.stem]["sha256"]:
+            raise ValueError(f"ARFF round trip changed file bytes: {path}")
+    write_json(audit_path, audit)
+    if read_json(audit_path) != audit:
+        raise ValueError(f"ARFF audit did not survive the storage round trip: {audit_path}")
+    return audit
