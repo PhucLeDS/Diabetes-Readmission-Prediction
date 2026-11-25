@@ -1,0 +1,12 @@
+{
+  "task_definition": "any_readmission",
+  "target_source": "readmitted",
+  "class_column": "class",
+  "class_mapping": {
+    "NO": "not_readmitted",
+    "<30": "readmitted",
+    ">30": "readmitted"
+  },
+  "class_values": ["not_readmitted", "readmitted"],
+  "positive_class": "readmitted"
+}

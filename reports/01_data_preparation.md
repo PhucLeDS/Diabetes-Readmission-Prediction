@@ -187,3 +187,75 @@ The export verified the ordered schema, unique IDs, and every prepared value aga
 The CSV has SHA-256 `0207daf2cb4f83700cf71337d39519aef7c7683e910a7ba6511216e6601a787f`. The local `outputs/preparation/preparation_manifest.json` records the schema, row and label counts, per-column empty counts, cohort flow, configuration checksum, and the checksums of 6 dataset and audit files.
 
 Both preparation notebooks ran from fresh kernels. A second run of the preparation notebook from raw files in a separate directory reproduced all 6 files and the manifest byte for byte.
+
+## 7. Target Transformation
+
+The binary target follows the Any Readmission mapping in the reference project's `config/task_A_final_labels.json`, as applied by `load_label_config()` and `load_labels()` in its `src/weka/weka_export.py`. The repository stores the mapping in [target_mapping.json](../config/target_mapping.json). The positive class, `readmitted`, includes both recorded timing categories.
+
+| Original label | Binary class | Encounters in the saved cohort |
+| --- | --- | ---: |
+| `NO` | `not_readmitted` | 41,479 |
+| `<30` | `readmitted` | 6,285 |
+| `>30` | `readmitted` | 22,226 |
+| **Total** | | **69,990** |
+
+| Binary class | Encounters | Share of cohort |
+| --- | ---: | ---: |
+| `not_readmitted` | 41,479 | 59.26% |
+| `readmitted` | 28,511 | 40.74% |
+
+[02_split_export.ipynb](../notebooks/02_split_export.ipynb) reads the saved CSV, checks its checksum, schema, original label counts, and identifier uniqueness, then constructs the binary target in memory. The loader accepts LF or CRLF representations of the preparation configuration when the checksum for one representation matches the manifest. The data CSV still requires an exact byte match.
+
+The internal table has 36 columns, including both identifiers and both target representations. The model view has 33 columns, consisting of the 32 ordered predictors and `class` in the final position. Every predictor value was verified against the saved CSV across all 69,990 rows. The model view retains 1,919 empty `race` fields and 3 empty `gender` fields across 1,920 rows. The source CSV retains its original three labels and the checksum recorded in Section 6. The binary counts also match the totals across the reference Any Readmission partitions.
+
+## 8. Data Splitting
+
+The split reads the saved `full_prepared.csv` and uses the policy in [split.json](../config/split.json). The reference implementation is `make_split_assignments()`, `_rank()`, `_one_fifth_rounded()`, and `_class_quotas()` in `src/preparation/data_splitting.py` of the reference project.
+
+1. Group the cohort by the three original `readmitted` labels. Set the test size to 20% of the cohort, rounded to the nearest integer with half ties rounded up.
+2. Allocate that size across labels by largest remainder. Assign the integer portion of each proportional quota first, then distribute remaining slots by fractional remainder, breaking ties in the order `NO`, `<30`, `>30`.
+3. Within each label, rank encounters by the SHA-256 digest of the ASCII string `42|test|encounter_id`, where `encounter_id` is the ID value. Break hash ties by numeric encounter ID, then by its original text. Assign the lowest ranks in each class to test.
+4. Apply the same size, quota, and ranking rules to select 20% of the remaining development encounters for validation, using the stage name `validation` in the hash. Assign the remaining encounters to train.
+
+The primary CSVs preserve ascending numeric encounter order, with original ID text breaking ties. The combined CSV appends validation rows after train rows in their respective orders. Each model file uses 32 predictors followed by the binary `class` in a 33-column UTF-8 CSV. The split manifest stores `encounter_id`, `patient_nbr`, and `split` in encounter order.
+
+| Dataset | Rows | Original `NO` | Original `<30` | Original `>30` | `not_readmitted` | `readmitted` | Readmitted share |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Train | 44,794 | 26,547 | 4,022 | 14,225 | 26,547 | 18,247 | 40.74% |
+| Validation | 11,198 | 6,636 | 1,006 | 3,556 | 6,636 | 4,562 | 40.74% |
+| Test | 13,998 | 8,296 | 1,257 | 4,445 | 8,296 | 5,702 | 40.73% |
+| Train + validation | 55,992 | 33,183 | 5,028 | 17,781 | 33,183 | 22,809 | 40.74% |
+
+| Dataset | Empty `race` fields | Empty `gender` fields | Rows with at least one empty field |
+| --- | ---: | ---: | ---: |
+| Train | 1,207 | 2 | 1,208 |
+| Validation | 315 | 0 | 315 |
+| Test | 397 | 1 | 397 |
+| Train + validation | 1,522 | 2 | 1,523 |
+
+All other exported columns have zero empty fields. CSV read-back confirmed ordered schema and field values, including empty fields and literal laboratory categories.
+
+The manifest covers all 69,990 encounters with no repeated encounters or patients across the primary splits. Every assignment and all four model CSVs match the reference membership, values, and row order. Reversing input row order produced the same assignments. A separate run from the saved cohort reproduced the four model CSVs and the split manifest byte for byte. The full prepared CSV and its preparation manifest retained their checksums.
+
+[02_split_export.ipynb](../notebooks/02_split_export.ipynb) presents the verified file counts and missingness. The combined file is intended for final training once model selection is complete, and test remains reserved for final evaluation.
+
+## 9. Dataset Export
+
+The Weka export reads the five saved CSVs and reconciles their row order, predictor values, and labels with the prepared cohort and split manifest. The model serialization follows `create_schema()`, `quote_arff()`, `arff_header()`, and `make_arff()` in the reference project's `src/weka/weka_export.py`. The final training schema follows `build_final_outputs()` in `src/weka/export_train_validation.py`. This implementation adds a full-cohort exploration ARFF, reconciles the source CSVs before writing, and records the exact categories converted to missing.
+
+Each ARFF has 33 ordered attributes with 8 numeric predictors and 24 nominal predictors before the final outcome attribute. Admission codes remain nominal. `full_prepared.arff` uses relation `diabetes_readmission_full_prepared` and the original `readmitted` domain `{NO,<30,>30}`. The five modeling files retain the reference relation name `Task_A_32_features` and use the Any Readmission domain `{not_readmitted,readmitted}` for `class`. In Weka, select `class` as the final model attribute and refer to the positive class by name, `readmitted`.
+
+| File | Rows | Predictor domains fitted on | Missing source fields | Unseen values converted to `?` |
+| --- | ---: | --- | ---: | ---: |
+| `full_prepared.arff` | 69,990 | Full prepared cohort | 1,922 | 0 |
+| `train.arff` | 44,794 | Train | 1,209 | 0 |
+| `validation.arff` | 11,198 | Train | 315 | 2 |
+| `test.arff` | 13,998 | Train | 398 | 2 |
+| `train_validation.arff` | 55,992 | Train + Validation | 1,524 | 0 |
+| `test_for_train_validation.arff` | 13,998 | Train + Validation | 398 | 2 |
+
+Empty fields and source missing markers are serialized as `?`. Literal laboratory `None` and diagnosis group `Missing` are quoted nominal values. In Validation, both unseen values were `admission_source_id = 14`. That code becomes part of the Train + Validation schema. Both Test files retain the exact same 13,998 encounters in the same order. Their data sections are identical, with one `admission_source_id = 11` field and one `chlorpropamide = Down` field converted to `?` in each file. Their only header difference is the inclusion of admission-source code `14` in the final training schema. The local `outputs/preparation/arff_export_audit.json` records the conversion counts, added domain values, and output checksums.
+
+Weka 3.9.7 loaded all six files. A Java check using Weka's `Instances` API verified relation names, ordered attribute types and domains, row counts, and every parsed value against the CSVs and the applicable nominal policy. Weka also confirmed header compatibility within each modeling stage and correctly decoded a separate fixture with quotes, backslashes, punctuation, control characters, and UTF-8 text. All five model ARFFs match the reference output byte for byte.
+
+[02_split_export.ipynb](../notebooks/02_split_export.ipynb) ran from a fresh kernel. A separate run from the saved cohort reproduced the four model CSVs, split manifest, six ARFFs, and ARFF audit byte for byte. Use `full_prepared.arff` for exploration, `test.arff` with the Train schema, and `test_for_train_validation.arff` with the Train + Validation schema.

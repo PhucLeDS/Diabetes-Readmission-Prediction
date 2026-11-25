@@ -1,6 +1,6 @@
 # Diabetes Readmission Prediction
 
-This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. The [data preparation report](reports/01_data_preparation.md) documents verified results from source checks through full prepared CSV export. Split benchmarks come from the Phase 0 source audit.
+This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. The [data preparation report](reports/01_data_preparation.md) documents verified results from source checks through CSV and Weka ARFF export.
 
 ## Contents
 
@@ -47,11 +47,11 @@ Cohort selection excludes encounters with the specified discharge codes related 
 
 The full prepared dataset retains two identifiers, 32 predictors, and the original `readmitted` label. The predictor set contains 8 numeric and 24 nominal attributes. It is a selected baseline that will be assessed through model experiments. The exported CSV was verified on 69,990 encounters and contains 1,922 empty fields across `race` and `gender`.
 
-The full dataset is stratified by the three original labels using seed `42`, then divided into train, validation, and test sets at approximately 64% / 16% / 20%. Each model dataset contains 32 predictors and `class`.
+The full dataset is stratified by the three original labels using seed `42` and deterministic SHA-256 ranking. The split assigns approximately 64% to train, 16% to validation, and 20% to test. Each model dataset contains 32 predictors and `class`. The combined file appends validation to train for final model fitting.
 
-The data-loading and cleaning steps each verified 101,766 encounters and 50 columns. Cleaning converted 192,852 source markers to empty fields. Cohort counts were verified by reading the saved cohort CSV. Split benchmarks come from the Phase 0 source audit.
+The data-loading and cleaning steps each verified 101,766 encounters and 50 columns. Cleaning converted 192,852 source markers to empty fields. Cohort and split counts were verified against the saved CSVs. All 69,990 split assignments match the reference run.
 
-| Benchmark | Rows |
+| Dataset stage | Rows |
 | --- | ---: |
 | Raw data | 101,766 |
 | After excluding ineligible encounters | 99,343 |
@@ -75,9 +75,9 @@ In the cohort, 41,479 encounters are `not_readmitted` and 28,511 are `readmitted
 | `data/weka/full_prepared.arff` | 32 predictors and the original label for exploration in Weka |
 | `data/weka/train.arff`, `validation.arff`, `test.arff` | Model datasets using the train schema |
 | `data/weka/train_validation.arff`, `test_for_train_validation.arff` | Model datasets using the train + validation schema |
-| `outputs/preparation/` | Audits, split manifest, and preparation manifest |
+| `outputs/preparation/` | Cleaning and feature audits, split and preparation manifests, and ARFF conversion audit |
 
-Nominal domains for model ARFF files are built from train during development and from train + validation for final training. Unseen nominal values are represented as `?` and recorded in the audit. Both test files use the same membership with their respective schemas.
+Nominal domains for model ARFF files are built from train during development and from train + validation for final training. Unseen nominal values are represented as `?` and recorded in the audit. Both test files use the same membership with their respective schemas. All six ARFF files were loaded and verified with Weka 3.9.7.
 
 ## Analysis and Modeling
 
@@ -123,6 +123,8 @@ python -m pip install -r requirements.txt
 Download `diabetic_data.csv` and `IDS_mapping.csv` from the UCI dataset page and place them in [data/raw/](data/raw/). Direct Python dependencies are listed in [requirements.txt](requirements.txt).
 
 Run [00_data_loading.ipynb](notebooks/00_data_loading.ipynb) from a fresh kernel to verify the source checksums and inspect the schema, patient coverage, and original labels. Run [01_data_preparation.ipynb](notebooks/01_data_preparation.ipynb) to normalize the approved markers, select the cohort, and write both datasets and their column audits. The notebook then groups the three ICD-9 fields, applies the ordered predictor list, and writes `full_prepared.csv` with its feature audit and preparation manifest.
+
+Run [02_split_export.ipynb](notebooks/02_split_export.ipynb) to verify the saved cohort, apply the Any Readmission mapping, and write four model CSVs, the split manifest, six Weka ARFF files, and the ARFF conversion audit. The notebook displays class distributions, missing fields, and unseen nominal values for the applicable exports.
 
 According to [.gitignore](.gitignore), data files and files in `outputs/preparation/` remain local. When cloning the repository, prepare the source data and run the workflow to regenerate the outputs.
 
