@@ -39,3 +39,7 @@ Thumbs.db
 # Generated EDA artifacts
 /outputs/tables/eda/*
 /outputs/figures/eda/*
+
+# Generated Analysis artifacts
+/outputs/tables/analysis/*
+/outputs/figures/analysis/*
