@@ -14,7 +14,10 @@ from src import io_utils, paths, validation
 
 class PathTests(unittest.TestCase):
     def test_resolves_project_paths_from_notebooks_directory(self):
-        root = Path(__file__).resolve().parents[1]
+        root = next(
+            parent for parent in Path(__file__).resolve().parents
+            if (parent / "src" / "paths.py").is_file() and (parent / "requirements.txt").is_file()
+        )
         environment = dict(os.environ, PYTHONPATH=str(root))
         result = subprocess.run(
             [
