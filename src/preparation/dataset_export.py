@@ -297,7 +297,7 @@ def save_model_partitions(
     return summaries
 
 
-MODEL_ARFF_RELATION = "Task_A_32_features"
+MODEL_ARFF_RELATION = "diabetes_readmission_32_features"
 FULL_ARFF_RELATION = "diabetes_readmission_full_prepared"
 ARFF_AUDIT_PATH = PREPARATION_OUTPUT_DIR / "arff_export_audit.json"
 ARFF_MISSING_VALUES = frozenset(("", "?"))

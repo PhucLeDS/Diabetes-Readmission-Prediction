@@ -1,5 +1,7 @@
 # Data Preparation Report
 
+This report documents preparation of the Any Readmission cohort and the verified CSV and Weka ARFF exports. The workflow retains 69,990 representative encounters from 101,766 source records. The model datasets use 32 baseline predictors and one binary class.
+
 ## 1. Data Loading
 
 The loader verifies the SHA-256 checksum, column order, and row count of both source CSV files. It reads UTF-8 with optional BOM and preserves fields as strings, including identifiers, empty fields, and literal values such as `?` and `None`.
@@ -152,7 +154,7 @@ The selection step applies the ordered baseline in [preparation.json](../config/
 | Replace source diagnoses during grouping | `diag_1`, `diag_2`, `diag_3` | The baseline retains their grouped counterparts. |
 | Omit derived columns | `total_prior_visits`, `has_prior_inpatient`, `A1C_tested`, `glucose_tested`, `admission_type_desc`, `admission_source_desc`, `discharge_disposition_desc` | The pipeline uses the original visit counts, laboratory categories, and admission or discharge codes at their relevant steps. |
 
-The 15 source columns are dropped from the already grouped schema. The audit also records the 3 earlier diagnosis replacements and the 7 derived columns that the pipeline omits. The baseline uses the recorded training-set evidence and the agreed policy. Its predictive value still needs evaluation, and the available records do not establish the full history of feature selection decisions.
+The 15 source columns are dropped from the already grouped schema. The audit also records the 3 earlier diagnosis replacements and the 7 derived columns that the pipeline omits. An audit of the 44,794 encounters assigned to Train reproduced the baseline rationale. Empty-field counts were 43,024 for `weight`, 19,527 for `payer_code`, and 21,483 for `medical_specialty`. The four constant medication columns and the seven counts of values other than `No` also matched. The three source diagnosis columns had 645, 672, and 700 distinct nonempty values in Train. Predictive value remains an empirical question.
 
 ### Verified Output
 
@@ -190,7 +192,7 @@ Both preparation notebooks ran from fresh kernels. A second run of the preparati
 
 ## 7. Target Transformation
 
-The binary target follows the Any Readmission mapping in the reference project's `config/task_A_final_labels.json`, as applied by `load_label_config()` and `load_labels()` in its `src/weka/weka_export.py`. The repository stores the mapping in [target_mapping.json](../config/target_mapping.json). The positive class, `readmitted`, includes both recorded timing categories.
+The binary target follows the reference project's Any Readmission mapping, as applied by `load_label_config()` and `load_labels()` in its `src/weka/weka_export.py`. The repository stores the mapping in [target_mapping.json](../config/target_mapping.json). The positive class, `readmitted`, includes both recorded timing categories.
 
 | Original label | Binary class | Encounters in the saved cohort |
 | --- | --- | ---: |
@@ -243,7 +245,7 @@ The manifest covers all 69,990 encounters with no repeated encounters or patient
 
 The Weka export reads the five saved CSVs and reconciles their row order, predictor values, and labels with the prepared cohort and split manifest. The model serialization follows `create_schema()`, `quote_arff()`, `arff_header()`, and `make_arff()` in the reference project's `src/weka/weka_export.py`. The final training schema follows `build_final_outputs()` in `src/weka/export_train_validation.py`. This implementation adds a full-cohort exploration ARFF, reconciles the source CSVs before writing, and records the exact categories converted to missing.
 
-Each ARFF has 33 ordered attributes with 8 numeric predictors and 24 nominal predictors before the final outcome attribute. Admission codes remain nominal. `full_prepared.arff` uses relation `diabetes_readmission_full_prepared` and the original `readmitted` domain `{NO,<30,>30}`. The five modeling files retain the reference relation name `Task_A_32_features` and use the Any Readmission domain `{not_readmitted,readmitted}` for `class`. In Weka, select `class` as the final model attribute and refer to the positive class by name, `readmitted`.
+Each ARFF has 33 ordered attributes with 8 numeric predictors and 24 nominal predictors before the final outcome attribute. Admission codes remain nominal. `full_prepared.arff` uses relation `diabetes_readmission_full_prepared` and the original `readmitted` domain `{NO,<30,>30}`. The five modeling files use relation `diabetes_readmission_32_features` with the Any Readmission domain `{not_readmitted,readmitted}` for `class`. In Weka, select `class` as the final model attribute and refer to the positive class by name, `readmitted`.
 
 | File | Rows | Predictor domains fitted on | Missing source fields | Unseen values converted to `?` |
 | --- | ---: | --- | ---: | ---: |
@@ -256,6 +258,29 @@ Each ARFF has 33 ordered attributes with 8 numeric predictors and 24 nominal pre
 
 Empty fields and source missing markers are serialized as `?`. Literal laboratory `None` and diagnosis group `Missing` are quoted nominal values. In Validation, both unseen values were `admission_source_id = 14`. That code becomes part of the Train + Validation schema. Both Test files retain the exact same 13,998 encounters in the same order. Their data sections are identical, with one `admission_source_id = 11` field and one `chlorpropamide = Down` field converted to `?` in each file. Their only header difference is the inclusion of admission-source code `14` in the final training schema. The local `outputs/preparation/arff_export_audit.json` records the conversion counts, added domain values, and output checksums.
 
-Weka 3.9.7 loaded all six files. A Java check using Weka's `Instances` API verified relation names, ordered attribute types and domains, row counts, and every parsed value against the CSVs and the applicable nominal policy. Weka also confirmed header compatibility within each modeling stage and correctly decoded a separate fixture with quotes, backslashes, punctuation, control characters, and UTF-8 text. All five model ARFFs match the reference output byte for byte.
+Weka 3.9.7 loaded all six files. A Java check using Weka's `Instances` API verified relation names, ordered attribute types and domains, row counts, and every parsed value against the CSVs and the applicable nominal policy. Weka also confirmed header compatibility within each modeling stage and correctly decoded a separate fixture with quotes, backslashes, punctuation, control characters, and UTF-8 text. The five model ARFFs preserve the reference attribute declarations and data records.
 
 [02_split_export.ipynb](../notebooks/02_split_export.ipynb) ran from a fresh kernel. A separate run from the saved cohort reproduced the four model CSVs, split manifest, six ARFFs, and ARFF audit byte for byte. Use `full_prepared.arff` for exploration, `test.arff` with the Train schema, and `test_for_train_validation.arff` with the Train + Validation schema.
+
+## 10. Final Validation
+
+The end-to-end suite ran all three preparation notebooks in fresh kernels using Python 3.13.5. Each of two independent workspaces started with the two official raw files, notebook sources, code, and configuration. The run generated 19 files. Their SHA-256 checksums were identical across both workspaces, and both raw files matched their approved checksums after processing.
+
+| Check | Verified result |
+| --- | --- |
+| Raw integrity and cleaning | Compared 101,766 encounters across 50 columns. Only the 192,852 approved marker cells changed. The cleaning audit reconciled per column, and laboratory `None` values were preserved. |
+| Cohort, diagnosis, and predictor schema | Rebuilt the lowest eligible encounter per patient independently from the cleaned CSV. All 69,990 cohort rows and ordered prepared values matched. The three diagnosis groups, numeric predictor types, original target counts, and missing-field counts reconciled with the saved data. |
+| Target and partitions | Verified the binary target on every model row and the original label counts per split. All 69,990 encounters and patients appeared exactly once across Train, Validation, and Test. Train + Validation matched the exact ordered concatenation of 55,992 rows. |
+| CSV and ARFF consistency | Checked all six ARFF headers, row counts, and decoded values against their CSV sources and fitting scopes. Verified the unseen nominal values and the output checksums in the ARFF audit. |
+| Reproducibility | Both clean runs reproduced all intermediate data, final datasets, manifests, and audits byte for byte. The rerun in the working repository after the ARFF rename also preserved the checksums of the existing inputs and generated outputs. |
+
+The full suite passed 61 tests, including the six end-to-end checks. The documented command-line workflow also generated all 19 files in a clean workspace and preserved the notebook source files. Run it from the repository root with the project environment active using `python -m unittest discover -s tests -v`. If either official raw CSV is absent, the integration class reports a skip and the unit tests can still run. The Weka runtime check is recorded in Section 9. The byte-for-byte benchmark uses the same configuration bytes and Python version for both runs. The preparation manifest records the configuration's byte checksum and the Python version. The files generated from the current checkout matched the saved release artifacts. The preparation manifest recorded a different configuration hash because the checkout uses CRLF and the earlier run used LF. Both hashes resolve to the same configuration content under the loader's line-ending check.
+
+See the [end-to-end tests](../tests/preparation/test_preparation_pipeline.py) for the checks applied to the generated files.
+
+## 11. Methodological Limitations
+
+- **Cohort selection.** The smallest eligible numeric encounter ID serves as a reproducible selection rule. The input has no encounter timestamps to establish chronological order. The cohort applies the documented death and hospice exclusions and retains 3,252 records with discharge codes `18` and `25`, whose descriptions leave disposition unclear.
+- **Target coverage.** The two recorded readmission categories form a single positive class. The source records category labels and supplies no exact days to readmission. The scope of readmissions outside the source observation coverage remains unverified.
+- **Predictor availability and representation.** The intended prediction point is near discharge. Availability of each attribute at that point requires independent clinical or operational verification. Broad ICD-9 groups discard code detail, and `None` in the laboratory columns leaves it unclear whether a test was performed. The fixed baseline still requires evaluation.
+- **Generalizability and evaluation.** The splits partition the historical cohort by patient and preserve original outcome proportions approximately. They do not establish performance on later cohorts, held-out hospitals, or external populations. Predictive performance, subgroup performance, and clinical applicability remain unevaluated.
