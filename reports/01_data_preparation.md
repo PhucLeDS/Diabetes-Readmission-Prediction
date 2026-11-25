@@ -1,5 +1,7 @@
 # Data Preparation Report
 
+This report documents preparation of the Any Readmission cohort and the verified CSV and Weka ARFF exports. The workflow retains 69,990 representative encounters from 101,766 source records. The model datasets use 32 baseline predictors and one binary class.
+
 ## 1. Data Loading
 
 The loader verifies the SHA-256 checksum, column order, and row count of both source CSV files. It reads UTF-8 with optional BOM and preserves fields as strings, including identifiers, empty fields, and literal values such as `?` and `None`.
@@ -152,7 +154,7 @@ The selection step applies the ordered baseline in [preparation.json](../config/
 | Replace source diagnoses during grouping | `diag_1`, `diag_2`, `diag_3` | The baseline retains their grouped counterparts. |
 | Omit derived columns | `total_prior_visits`, `has_prior_inpatient`, `A1C_tested`, `glucose_tested`, `admission_type_desc`, `admission_source_desc`, `discharge_disposition_desc` | The pipeline uses the original visit counts, laboratory categories, and admission or discharge codes at their relevant steps. |
 
-The 15 source columns are dropped from the already grouped schema. The audit also records the 3 earlier diagnosis replacements and the 7 derived columns that the pipeline omits. The baseline uses the recorded training-set evidence and the agreed policy. Its predictive value still needs evaluation, and the available records do not establish the full history of feature selection decisions.
+The 15 source columns are dropped from the already grouped schema. The audit also records the 3 earlier diagnosis replacements and the 7 derived columns that the pipeline omits. An audit of the 44,794 encounters assigned to Train reproduced the baseline rationale. Empty-field counts were 43,024 for `weight`, 19,527 for `payer_code`, and 21,483 for `medical_specialty`. The four constant medication columns and the seven counts of values other than `No` also matched. The three source diagnosis columns had 645, 672, and 700 distinct nonempty values in Train. Predictive value remains an empirical question.
 
 ### Verified Output
 
@@ -270,8 +272,15 @@ The end-to-end suite ran all three preparation notebooks in fresh kernels using 
 | Cohort, diagnosis, and predictor schema | Rebuilt the lowest eligible encounter per patient independently from the cleaned CSV. All 69,990 cohort rows and ordered prepared values matched. The three diagnosis groups, numeric predictor types, original target counts, and missing-field counts reconciled with the saved data. |
 | Target and partitions | Verified the binary target on every model row and the original label counts per split. All 69,990 encounters and patients appeared exactly once across Train, Validation, and Test. Train + Validation matched the exact ordered concatenation of 55,992 rows. |
 | CSV and ARFF consistency | Checked all six ARFF headers, row counts, and decoded values against their CSV sources and fitting scopes. Verified the unseen nominal values and the output checksums in the ARFF audit. |
-| Reproducibility | Both clean runs reproduced all intermediate data, final datasets, manifests, and audits byte for byte. The 36 existing repository files included in the run's integrity check also matched their checksums before and after testing. |
+| Reproducibility | Both clean runs reproduced all intermediate data, final datasets, manifests, and audits byte for byte. The rerun in the working repository after the ARFF rename also preserved the checksums of the existing inputs and generated outputs. |
 
-The full suite passed 61 tests, including the six end-to-end checks. Run it from the repository root with the project environment active using `python -m unittest discover -s tests -v`. If either official raw CSV is absent, the integration class reports a skip and the unit tests can still run. The Weka runtime check is recorded in Section 9. The byte-for-byte benchmark uses the same configuration bytes and Python version for both runs. The preparation manifest records the configuration's byte checksum and the Python version.
+The full suite passed 61 tests, including the six end-to-end checks. The documented command-line workflow also generated all 19 files in a clean workspace and preserved the notebook source files. Run it from the repository root with the project environment active using `python -m unittest discover -s tests -v`. If either official raw CSV is absent, the integration class reports a skip and the unit tests can still run. The Weka runtime check is recorded in Section 9. The byte-for-byte benchmark uses the same configuration bytes and Python version for both runs. The preparation manifest records the configuration's byte checksum and the Python version. The files generated from the current checkout matched the saved release artifacts. The preparation manifest recorded a different configuration hash because the checkout uses CRLF and the earlier run used LF. Both hashes resolve to the same configuration content under the loader's line-ending check.
 
-See the [end-to-end tests](../tests/test_preparation_pipeline.py) for the checks applied to the generated files.
+See the [end-to-end tests](../tests/preparation/test_preparation_pipeline.py) for the checks applied to the generated files.
+
+## 11. Methodological Limitations
+
+- **Cohort selection.** The smallest eligible numeric encounter ID serves as a reproducible selection rule. The input has no encounter timestamps to establish chronological order. The cohort applies the documented death and hospice exclusions and retains 3,252 records with discharge codes `18` and `25`, whose descriptions leave disposition unclear.
+- **Target coverage.** The two recorded readmission categories form a single positive class. The source records category labels and supplies no exact days to readmission. The scope of readmissions outside the source observation coverage remains unverified.
+- **Predictor availability and representation.** The intended prediction point is near discharge. Availability of each attribute at that point requires independent clinical or operational verification. Broad ICD-9 groups discard code detail, and `None` in the laboratory columns leaves it unclear whether a test was performed. The fixed baseline still requires evaluation.
+- **Generalizability and evaluation.** The splits partition the historical cohort by patient and preserve original outcome proportions approximately. They do not establish performance on later cohorts, held-out hospitals, or external populations. Predictive performance, subgroup performance, and clinical applicability remain unevaluated.
