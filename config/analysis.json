@@ -1,0 +1,149 @@
+{
+  "dataset": "full_prepared",
+  "scope": "full_cohort_including_test",
+  "unit": "one representative encounter per patient",
+  "prediction_point": "near discharge",
+  "small_groups": {
+    "minimum_patients": 30,
+    "minimum_per_class": 5
+  },
+  "questions": {
+    "Q1": {
+      "question": "How many recorded readmissions does a prior service use alert capture or miss?",
+      "visit_columns": [
+        "number_outpatient",
+        "number_emergency",
+        "number_inpatient"
+      ],
+      "comparison_groups": [
+        "no_recorded_prior_visits",
+        "any_recorded_prior_visit"
+      ],
+      "reference_group": "no_recorded_prior_visits",
+      "inpatient_column": "number_inpatient",
+      "inpatient_groups": [
+        {
+          "label": "0",
+          "minimum": 0,
+          "maximum": 0
+        },
+        {
+          "label": "1",
+          "minimum": 1,
+          "maximum": 1
+        },
+        {
+          "label": "2+",
+          "minimum": 2,
+          "maximum": null
+        }
+      ],
+      "alert_rule": "Alert when any of the three counts is greater than zero.",
+      "missing_policy": "Flag rows with an empty history count as unknown for joint groups. Report them separately from rule metrics.",
+      "evaluation": "Compare precision, recall, alert counts and missed cases on the same evaluation patients, including errors among patients with no recorded prior visits."
+    },
+    "Q2": {
+      "question": "How do current encounter characteristics relate to recorded readmission within each prior service group?",
+      "stay_column": "time_in_hospital",
+      "stay_groups": [
+        {
+          "label": "1-3",
+          "minimum": 1,
+          "maximum": 3
+        },
+        {
+          "label": "4-7",
+          "minimum": 4,
+          "maximum": 7
+        },
+        {
+          "label": "8-14",
+          "minimum": 8,
+          "maximum": 14
+        }
+      ],
+      "diagnoses_count_column": "number_diagnoses",
+      "primary_diagnosis_column": "diag_1_group",
+      "focus_group": "no_recorded_prior_visits",
+      "comparison_group": "any_recorded_prior_visit",
+      "grouping_policy": "The stay intervals include both endpoints. Keep each observed diagnosis count and diagnosis group, including the source grouping labels Missing and Unmapped. Report blank fields or stay values outside the configured intervals.",
+      "evaluation": "Compare a model using only the three history counts with the same approach after adding the current encounter predictors specified here. Compare recall and false positives among patients with no recorded prior visits."
+    },
+    "Q3": {
+      "question": "How much of the cohort do laboratory results and treatment records cover, and what readmission rates do these groups have?",
+      "result_levels": {
+        "A1Cresult": [
+          "Norm",
+          ">7",
+          ">8"
+        ],
+        "max_glu_serum": [
+          "Norm",
+          ">200",
+          ">300"
+        ]
+      },
+      "no_recorded_result": "None",
+      "recording_groups": [
+        {
+          "label": "neither",
+          "a1c_recorded": false,
+          "glucose_recorded": false
+        },
+        {
+          "label": "a1c_only",
+          "a1c_recorded": true,
+          "glucose_recorded": false
+        },
+        {
+          "label": "glucose_only",
+          "a1c_recorded": false,
+          "glucose_recorded": true
+        },
+        {
+          "label": "both",
+          "a1c_recorded": true,
+          "glucose_recorded": true
+        }
+      ],
+      "recording_reference_group": "neither",
+      "treatment_levels": {
+        "insulin": [
+          "No",
+          "Steady",
+          "Up",
+          "Down"
+        ],
+        "change": [
+          "No",
+          "Ch"
+        ],
+        "diabetesMed": [
+          "No",
+          "Yes"
+        ]
+      },
+      "missing_policy": "Preserve the source levels. Report empty or invalid values separately from the laboratory category None.",
+      "evaluation": "Check coverage and readmission counts for rules involving these attributes. Compare model performance by recorded laboratory result status."
+    },
+    "Q4": {
+      "question": "How does confidence for each combined condition compare with confidence for its individual conditions?",
+      "rules": [
+        {
+          "history_condition": "prior_inpatient",
+          "stay_group": "8-14"
+        },
+        {
+          "history_condition": "no_recorded_prior_visits",
+          "stay_group": "8-14"
+        }
+      ],
+      "history_condition_definitions": {
+        "prior_inpatient": "At least one prior inpatient visit is recorded.",
+        "no_recorded_prior_visits": "All three prior service counts are zero."
+      },
+      "lift_reference": "full_cohort_readmission_rate",
+      "evaluation": "Compare rule coverage, support, confidence and lift with rules mined on Train and checked on Validation using the same counting definitions."
+    }
+  }
+}
