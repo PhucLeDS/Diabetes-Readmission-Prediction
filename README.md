@@ -1,12 +1,13 @@
 # Diabetes Readmission Prediction
 
-This project uses the Diabetes 130-US Hospitals dataset to study whether a patient has a recorded hospital readmission after an eligible inpatient encounter. The workflow uses Python and Jupyter for data preparation and Weka for data mining and model evaluation. The [Data Preparation Report](reports/01_data_preparation.md) documents the verified cohort, datasets, and validation results.
+This project uses the Diabetes 130-US Hospitals dataset to study whether a patient has a recorded hospital readmission after an eligible inpatient encounter. The workflow uses Python and Jupyter for data preparation and exploration, and Weka for data mining and model evaluation. The [Data Preparation Report](reports/01_data_preparation.md) documents cohort construction. The [EDA Report](reports/02_eda.md) describes the prepared cohort's completeness, distributions, and relationships between attributes.
 
 ## Contents
 
 - [Research Objective](#research-objective)
 - [Dataset](#dataset)
 - [Data Preparation](#data-preparation)
+- [Exploratory Data Analysis](#exploratory-data-analysis)
 - [Analysis and Modeling](#analysis-and-modeling)
 - [Repository Structure](#repository-structure)
 - [Installation and Usage](#installation-and-usage)
@@ -66,24 +67,32 @@ Train, Validation, and Test account for approximately 64%, 16%, and 20% of the c
 
 Both Test ARFFs represent the same held-out encounters. The exporter uses `?` for missing values and unseen nominal predictor values, whose counts and tokens are recorded in the ARFF audit.
 
+## Exploratory Data Analysis
+
+The [EDA notebook](notebooks/03_eda.ipynb) describes the full cohort of 69,990 patients, including all 8 numeric predictors, 24 nominal predictors, and the Any Readmission outcome distribution. The prepared data contains 1,922 empty fields across 1,920 patients. A separate laboratory summary shows that 54,041 patients have neither test result recorded. The [EDA Report](reports/02_eda.md) explains the denominators, evidence, and limits of these summaries.
+
+EDA uses the entire prepared cohort, including patients assigned to Test. Record any influence of full-cohort exploration on later modeling decisions when interpreting the final evaluation.
+
 ## Analysis and Modeling
 
-1. **EDA and Analysis.** Use cohort audits for descriptive context and Train for feature distributions, missingness, and relationships with the outcome that may inform experimental decisions.
+1. **Analysis.** Select and define analysis questions based on the descriptive results before examining them in depth.
 2. **Data Mining.** Evaluate methods on training data within the experimental protocol.
 3. **Model Training and Evaluation.** Fit data-dependent transforms on Train or within each training fold. Use Validation to choose the approach. After selection, fit on Train + Validation and evaluate once on the matching Test export.
 
-EDA, data mining, and model evaluation are pending in this repository. The preparation report records the evidence used to define the baseline predictor set. [Feature selection](reports/01_data_preparation.md#5-feature-selection)
+Analysis, data mining, and model evaluation are pending in this repository. The preparation report records the evidence used to define the baseline predictor set. [Feature selection](reports/01_data_preparation.md#5-feature-selection)
 
 ## Repository Structure
 
 | Directory | Purpose |
 | --- | --- |
 | `data/` | Source files, intermediate data, and generated CSV and ARFF datasets |
-| `src/` | Data preparation, I/O, and validation logic |
+| `src/` | Data preparation, EDA, I/O, and validation logic |
 | `notebooks/` | Workflow entry points and displayed results |
 | `config/` | Cleaning, cohort, predictor, target, and split policies |
 | `outputs/preparation/` | Generated audits and manifests |
-| `reports/` | Methods and verified preparation results |
+| `outputs/tables/eda/` | Locally generated aggregate EDA tables and manifest |
+| `outputs/figures/eda/` | Locally generated EDA figures |
+| `reports/` | Methods and verified preparation and EDA results |
 | `tests/` | Unit and end-to-end tests |
 | `weka_java/` | Reserved directories for data mining and model training code |
 
@@ -101,7 +110,7 @@ python -m ipykernel install --sys-prefix --name diabetes-readmission \
   --display-name "Python (Diabetes Readmission)"
 ```
 
-The pinned packages provide the notebook kernel and command-line runner. [Python requirements](requirements.txt)
+The pinned packages provide the notebook environment and the libraries for EDA. [Python requirements](requirements.txt)
 
 ### Place the raw inputs
 
@@ -128,6 +137,16 @@ jupyter execute --kernel_name=diabetes-readmission --timeout=180 \
 
 This command executes the notebooks without saving cell outputs to their source files. Data and preparation artifacts are local. The writers protect existing artifacts from conflicting content. If an older artifact blocks a run, archive the affected generated files and their audit or manifest before rerunning the corresponding notebooks. Keep both raw inputs in place. [Git ignore rules](.gitignore)
 
+### Explore the Prepared Cohort
+
+After generating `full_prepared.csv` and the preparation audits, open [03_eda.ipynb](notebooks/03_eda.ipynb), select the **Python (Diabetes Readmission)** kernel, and run every cell. From the repository root with the project environment active, generate the local tables, figures, and manifest:
+
+```bash
+python -m src.eda.export
+```
+
+Use `--output-dir` to export to a separate location. The exporter reuses identical existing files and stops if an existing artifact differs. Use `--overwrite` to replace differing local EDA artifacts after reviewing the change. Generated EDA tables and figures are ignored by Git and can be recreated with this command.
+
 ### Use the ARFF files in Weka
 
 Open the relevant ARFF in Weka Explorer under **Preprocess**. For a modeling file, set the last attribute, `class`, as the class and identify the positive value by name, `readmitted`. Pair Train with the development schema exports and Train + Validation with `test_for_train_validation.arff`. Successful loading and header compatibility were verified in Weka 3.9.7. [Dataset export checks](reports/01_data_preparation.md#9-dataset-export)
@@ -140,7 +159,7 @@ Run the suite from the repository root with the project environment active.
 python -m unittest discover -s tests -v
 ```
 
-The full suite passed 62 tests. It executes the three notebooks twice in isolated workspaces and verifies 19 generated files byte for byte under the same Python version and configuration. The integration checks report a skip if either official raw CSV is absent. Weka loading is verified separately. [Final validation](reports/01_data_preparation.md#10-final-validation)
+The preparation suite passed 62 tests, including two isolated notebook runs that reproduce 19 generated files byte for byte under the verified environment. Three EDA tests check input and output checksums, consistency between tables, and output conflict handling. Two independent EDA exports reproduced 24 tables, 10 figures, and one manifest byte for byte in the verified environment. Integration checks report a skip when required inputs are absent. Weka loading is verified separately. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation) · [EDA validation](reports/02_eda.md#9-reproduction-and-validation)
 
 ## Limitations
 
