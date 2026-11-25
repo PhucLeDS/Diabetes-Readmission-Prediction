@@ -1,11 +1,17 @@
-"""Plot exact count distributions for the full prepared cohort."""
+"""Plot descriptive distributions for the full prepared cohort."""
+
+from textwrap import shorten
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
+import numpy as np
 import pandas as pd
 
+from src.eda.data import ADMISSION_COLUMNS
 from src.eda.descriptive import PRIOR_VISIT_COLUMNS
+from src.eda.nominal import DEMOGRAPHIC_COLUMNS, MEDICATION_FLAG_COLUMNS, NominalProfile
+from src.preparation.dataset_preparation import DIAGNOSIS_GROUP_COLUMNS
 
 
 ENCOUNTER_MEASURES = {
@@ -64,3 +70,111 @@ def plot_numeric_distributions(frequency: pd.DataFrame, *, cohort_size: int) -> 
             distribution_ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
 
     return {"encounter_numeric_distributions": current, "prior_visit_distributions": prior}
+
+
+def _plot_category_counts(ax, rows: pd.DataFrame, *, title: str, labels=None, colors=BAR_COLOR) -> None:
+    labels = rows["value"].replace("", "(Empty field)") if labels is None else labels
+    counts = rows["patients"]
+    bars = ax.barh(labels, counts, color=colors)
+    ax.bar_label(bars, labels=[f"{count:,}" for count in counts], padding=4, fontsize=8)
+    ax.invert_yaxis()
+    ax.set(title=title, xlabel="Patients", xlim=(0, max(int(counts.max()), 1) * 1.23))
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+
+
+def plot_nominal_distributions(profile: NominalProfile) -> dict[str, Figure]:
+    """Build one cohort figure per group of nominal predictors."""
+    frequency = profile.nominal_frequency
+    cohort_size = int(frequency["cohort_size"].iloc[0])
+    scope = f"Full prepared cohort (N = {cohort_size:,})"
+    with plt.rc_context({"axes.spines.top": False, "axes.spines.right": False}):
+        demographics, axes = plt.subplots(1, 3, figsize=(12, 4.3), layout="constrained")
+        demographics.suptitle(f"Demographics | {scope}")
+        for ax, column in zip(axes, DEMOGRAPHIC_COLUMNS, strict=True):
+            _plot_category_counts(ax, frequency.loc[frequency["column"].eq(column)], title=column.title())
+
+        admissions, axes = plt.subplots(1, 2, figsize=(15, 7.5), layout="constrained")
+        admissions.suptitle(f"Admission Codes | {scope}")
+        for ax, column, title in zip(
+            axes, ADMISSION_COLUMNS, ("Admission type", "Admission source"), strict=True,
+        ):
+            rows = profile.admission_descriptions.loc[profile.admission_descriptions["column"].eq(column)]
+            labels = rows["code"].replace("", "(Empty field)") + " | " + rows["description"].where(
+                rows["description"].ne(""), rows["lookup_status"],
+            )
+            labels = [shorten(label, width=42, placeholder="...") for label in labels]
+            colors = rows["lookup_status"].map(lambda status: BAR_COLOR if status == "Mapped" else "#ad703b")
+            _plot_category_counts(ax, rows, title=title, labels=labels, colors=colors)
+
+        lab, axes = plt.subplots(1, 3, figsize=(13, 4.4), layout="constrained")
+        lab.suptitle(f"Laboratory Results | {scope}")
+        lab_titles = {"A1Cresult": "HbA1c", "max_glu_serum": "Serum glucose"}
+        recorded_by_test = profile.laboratory_results.drop_duplicates("column").set_index("column")
+        share = recorded_by_test.loc[list(lab_titles), "recorded_percent_of_cohort"]
+        bars = axes[0].barh(list(lab_titles.values()), share, color=BAR_COLOR)
+        axes[0].bar_label(bars, labels=[f"{percent:.2f}%" for percent in share], padding=4, fontsize=8)
+        axes[0].invert_yaxis()
+        axes[0].set(title="Recorded result by test", xlabel="% of full cohort", xlim=(0, 100))
+        for ax, (column, title) in zip(axes[1:], lab_titles.items(), strict=True):
+            rows = profile.laboratory_results.loc[
+                profile.laboratory_results["column"].eq(column) & profile.laboratory_results["result_recorded"]
+            ]
+            n = int(rows["patients"].sum())
+            if rows.empty:
+                ax.set(title=f"{title} result levels (n = 0)")
+            else:
+                _plot_category_counts(ax, rows, title=f"{title} result levels (n = {n:,})")
+
+        medications, axes = plt.subplots(1, 2, figsize=(12, 6.4), width_ratios=(1.45, 1), layout="constrained")
+        medications.suptitle(f"Diabetes Medication Records | {scope}")
+        drugs = profile.medication_status.sort_values("any_non_no_patients", ascending=False, kind="stable")
+        counts = drugs["any_non_no_patients"]
+        axes[0].scatter(counts, drugs["column"], color=BAR_COLOR, s=26)
+        for count, drug in zip(counts, drugs["column"], strict=True):
+            axes[0].annotate(f"{count:,}", (count, drug), xytext=(6, 0), textcoords="offset points", va="center", fontsize=8)
+        axes[0].invert_yaxis()
+        # Symmetric log keeps a zero count visible if a drug has no recorded non-No status.
+        axes[0].set_xscale("symlog", linthresh=1)
+        axes[0].set(
+            title="Patients with a recorded non-No status",
+            xlabel="Patients (logarithmic above 1)",
+            xlim=(0, max(int(counts.max()), 10) * 2.2),
+        )
+        axes[0].grid(axis="x", alpha=0.22)
+        flags = frequency.loc[frequency["column"].isin(MEDICATION_FLAG_COLUMNS)]
+        flag_labels = flags["column"].map({"change": "Change", "diabetesMed": "Diabetes medication"})
+        flag_labels = flag_labels + " | " + flags["value"].replace("", "(Empty field)")
+        _plot_category_counts(axes[1], flags, title="Summary flags", labels=flag_labels)
+
+        diagnoses, axes = plt.subplots(1, 2, figsize=(13.5, 7), sharey=True, layout="constrained")
+        diagnoses.suptitle(f"Diagnosis Groups | {scope}")
+        groups = profile.diagnosis_summary
+        positions = np.arange(len(groups))
+        for level, (column, title, color) in enumerate(zip(
+            DIAGNOSIS_GROUP_COLUMNS, ("Primary", "Secondary", "Additional secondary"),
+            (BAR_COLOR, "#459787", "#8295a0"), strict=True,
+        )):
+            axes[0].barh(
+                positions + (level - 1) * 0.24, groups[f"{column}_patients"],
+                height=0.23, label=title, color=color,
+            )
+        axes[0].set_yticks(positions, labels=groups["group"].replace("", "(Empty field)"))
+        axes[0].invert_yaxis()
+        axes[0].set(title="By position", xlabel="Patients")
+        axes[0].legend(fontsize=8, loc="lower right")
+        bars = axes[1].barh(positions, groups["patients_at_any_position"], color=BAR_COLOR, height=0.70)
+        axes[1].bar_label(
+            bars, labels=[f"{n:,}" for n in groups["patients_at_any_position"]], padding=4, fontsize=8,
+        )
+        axes[1].set(
+            title="At any position (one count per patient and group)", xlabel="Patients",
+            xlim=(0, max(int(groups["patients_at_any_position"].max()), 1) * 1.2),
+        )
+
+    return {
+        "demographic_distributions": demographics,
+        "admission_distributions": admissions,
+        "laboratory_result_distributions": lab,
+        "medication_distributions": medications,
+        "diagnosis_group_distributions": diagnoses,
+    }
