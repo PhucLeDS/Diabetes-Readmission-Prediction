@@ -1,0 +1,90 @@
+{
+  "cleaning": {
+    "missing_markers": {
+      "race": "?",
+      "gender": "Unknown/Invalid",
+      "weight": "?",
+      "payer_code": "?",
+      "medical_specialty": "?",
+      "diag_1": "?",
+      "diag_2": "?",
+      "diag_3": "?"
+    },
+    "preserve_literals": {
+      "A1Cresult": "None",
+      "max_glu_serum": "None"
+    }
+  },
+  "cohort": {
+    "excluded_discharge_codes": [
+      "11",
+      "13",
+      "14",
+      "19",
+      "20",
+      "21"
+    ]
+  },
+  "feature_selection": {
+    "predictors": [
+      "race",
+      "gender",
+      "age",
+      "admission_type_id",
+      "admission_source_id",
+      "time_in_hospital",
+      "num_lab_procedures",
+      "num_procedures",
+      "num_medications",
+      "number_outpatient",
+      "number_emergency",
+      "number_inpatient",
+      "number_diagnoses",
+      "max_glu_serum",
+      "A1Cresult",
+      "metformin",
+      "repaglinide",
+      "nateglinide",
+      "chlorpropamide",
+      "glimepiride",
+      "glipizide",
+      "glyburide",
+      "pioglitazone",
+      "rosiglitazone",
+      "acarbose",
+      "insulin",
+      "glyburide-metformin",
+      "change",
+      "diabetesMed",
+      "diag_1_group",
+      "diag_2_group",
+      "diag_3_group"
+    ],
+    "dropped_source_columns": {
+      "weight": "96.05% empty in the reference Train profile.",
+      "examide": "Constant No in the reference Train profile.",
+      "citoglipton": "Constant No in the reference Train profile.",
+      "troglitazone": "Constant No in the reference Train profile.",
+      "glimepiride-pioglitazone": "Constant No in the reference Train profile.",
+      "acetohexamide": "1 observations other than No in the reference Train profile.",
+      "tolbutamide": "12 observations other than No in the reference Train profile.",
+      "miglitol": "13 observations other than No in the reference Train profile.",
+      "tolazamide": "18 observations other than No in the reference Train profile.",
+      "glipizide-metformin": "4 observations other than No in the reference Train profile.",
+      "metformin-rosiglitazone": "2 observations other than No in the reference Train profile.",
+      "metformin-pioglitazone": "1 observations other than No in the reference Train profile.",
+      "discharge_disposition_id": "Used for cohort eligibility. Availability at prediction time is unverified.",
+      "payer_code": "43.59% empty in the reference Train profile.",
+      "medical_specialty": "47.96% empty and many categories in the reference Train profile."
+    },
+    "not_created_columns": {
+      "total_prior_visits": "The three source visit counts are retained.",
+      "has_prior_inpatient": "The source inpatient visit count is retained.",
+      "A1C_tested": "The original A1C result category is retained.",
+      "glucose_tested": "The original glucose result category is retained.",
+      "admission_type_desc": "The source code supplies the category.",
+      "admission_source_desc": "The source code supplies the category.",
+      "discharge_disposition_desc": "The source code supplies cohort eligibility."
+    }
+  }
+}

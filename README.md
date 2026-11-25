@@ -1,6 +1,6 @@
 # Diabetes Readmission Prediction
 
-This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. This README describes the project design and verified reference benchmarks. Results from this repository's pipeline will be confirmed through execution.
+This project studies hospital readmission among patients with diabetes using data mining and machine learning. The workflow uses Python, Jupyter Notebook, and Weka to prepare data, conduct analyses, and develop models. The [data preparation report](reports/01_data_preparation.md) documents verified results from source checks through full prepared CSV export. Split benchmarks come from the Phase 0 source audit.
 
 ## Contents
 
@@ -45,11 +45,11 @@ The preparation workflow validates source data, normalizes missing values, selec
 
 Cohort selection excludes encounters with the specified discharge codes related to death or hospice. For each patient, it then selects the eligible encounter with the smallest numeric `encounter_id`. This ID identifies the representative record. The source data does not contain timestamps that establish chronological encounter order.
 
-The full prepared dataset retains two identifiers, 32 predictors, and the original `readmitted` label. The predictor set contains 8 numeric and 24 nominal attributes. It is a selected baseline that will be assessed through model experiments.
+The full prepared dataset retains two identifiers, 32 predictors, and the original `readmitted` label. The predictor set contains 8 numeric and 24 nominal attributes. It is a selected baseline that will be assessed through model experiments. The exported CSV was verified on 69,990 encounters and contains 1,922 empty fields across `race` and `gender`.
 
 The full dataset is stratified by the three original labels using seed `42`, then divided into train, validation, and test sets at approximately 64% / 16% / 20%. Each model dataset contains 32 predictors and `class`.
 
-The following benchmarks were verified during Phase 0 using the source data. They will be checked again when the repository's pipeline runs.
+The data-loading and cleaning steps each verified 101,766 encounters and 50 columns. Cleaning converted 192,852 source markers to empty fields. Cohort counts were verified by reading the saved cohort CSV. Split benchmarks come from the Phase 0 source audit.
 
 | Benchmark | Rows |
 | --- | ---: |
@@ -61,7 +61,7 @@ The following benchmarks were verified during Phase 0 using the source data. The
 | Test | 13,998 |
 | Train + validation | 55,992 |
 
-In the reference cohort, 41,479 encounters are `not_readmitted` and 28,511 are `readmitted`. The positive class represents 40.74% of 69,990 encounters.
+In the cohort, 41,479 encounters are `not_readmitted` and 28,511 are `readmitted`. The positive class represents 40.74% of 69,990 encounters.
 
 ### Data Products
 
@@ -122,7 +122,7 @@ python -m pip install -r requirements.txt
 
 Download `diabetic_data.csv` and `IDS_mapping.csv` from the UCI dataset page and place them in [data/raw/](data/raw/). Direct Python dependencies are listed in [requirements.txt](requirements.txt).
 
-Once the preparation notebooks are implemented, run `00_data_loading.ipynb`, `01_data_preparation.ipynb`, and `02_split_export.ipynb` in that order, each with a fresh kernel. The splitting step reads the saved `full_prepared.csv`.
+Run [00_data_loading.ipynb](notebooks/00_data_loading.ipynb) from a fresh kernel to verify the source checksums and inspect the schema, patient coverage, and original labels. Run [01_data_preparation.ipynb](notebooks/01_data_preparation.ipynb) to normalize the approved markers, select the cohort, and write both datasets and their column audits. The notebook then groups the three ICD-9 fields, applies the ordered predictor list, and writes `full_prepared.csv` with its feature audit and preparation manifest.
 
 According to [.gitignore](.gitignore), data files and files in `outputs/preparation/` remain local. When cloning the repository, prepare the source data and run the workflow to regenerate the outputs.
 
@@ -130,4 +130,4 @@ According to [.gitignore](.gitignore), data files and files in `outputs/preparat
 
 Configurations, checksums, schemas, and audits support reconciliation from raw data to exported datasets. Validation covers label values, row counts, identifier uniqueness, patient isolation, CSV/ARFF compatibility, and split reproducibility. Validation results and methods are recorded in [reports/](reports/).
 
-The availability of each predictor near discharge has not been independently verified. The reference cohort retains 3,252 encounters with discharge disposition unknown according to the mapping. The historical dataset, missing-value recording practices, and diagnosis grouping require consideration when interpreting results. Clinical applicability and generalizability remain unverified.
+The availability of each predictor near discharge has not been independently verified. The cohort retains 3,252 encounters with discharge descriptions recorded as `NULL` or `Not Mapped`. The historical dataset, missing-value recording practices, and diagnosis grouping require consideration when interpreting results. Clinical applicability and generalizability remain unverified.
