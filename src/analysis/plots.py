@@ -79,3 +79,40 @@ def plot_stay_by_history(summary: pd.DataFrame) -> Figure:
         cohort_size = summary["cohort_size"].iloc[0]
         figure.suptitle(f"Length of stay and Any Readmission by prior service use\nFull cohort of {cohort_size:,} patients")
     return figure
+
+
+def plot_lab_recording_by_outcome(summary: pd.DataFrame) -> Figure:
+    """Compare laboratory recording coverage and readmission rates by pattern."""
+    labels = summary["recording_pattern"].map({
+        "neither": "Neither result recorded",
+        "a1c_only": "HbA1c only",
+        "glucose_only": "Glucose only",
+        "both": "Both results recorded",
+        "unknown": "Unknown recording status",
+    })
+    rates = summary["readmission_rate_percent"]
+    coverage = summary["coverage_percent"]
+    with plt.rc_context({"axes.spines.top": False, "axes.spines.right": False}):
+        figure, (coverage_ax, rate_ax) = plt.subplots(1, 2, figsize=(10.8, 4.0), sharey=True, layout="constrained")
+        coverage_bars = coverage_ax.barh(labels, coverage.fillna(0), color="#2F6786")
+        coverage_ax.bar_label(
+            coverage_bars,
+            labels=[f"{rate:.1f}% (n={count:,})" for rate, count in zip(coverage, summary["patients"], strict=True)],
+            padding=4, fontsize=9,
+        )
+        coverage_ax.set(title="Coverage in the full cohort", xlabel="Share of all patients")
+
+        rate_bars = rate_ax.barh(labels, rates.fillna(0), color="#A8501F")
+        rate_ax.bar_label(
+            rate_bars,
+            labels=[f"{rate:.1f}%" if pd.notna(rate) else "Undefined" for rate in rates],
+            padding=4, fontsize=9,
+        )
+        rate_ax.set(title="Readmission rate within each group", xlabel="Share of patients in group")
+        for ax in (coverage_ax, rate_ax):
+            ax.set(xlim=(0, 115), xticks=range(0, 101, 20))
+            ax.xaxis.set_major_formatter(PercentFormatter(xmax=100))
+        coverage_ax.invert_yaxis()
+        cohort_size = summary["cohort_size"].iloc[0]
+        figure.suptitle(f"Laboratory result recording and Any Readmission\nFull cohort of {cohort_size:,} patients")
+    return figure
