@@ -42,3 +42,35 @@ The encounter data contains **101,766 encounters** with unique `encounter_id` va
 | `max_glu_serum` | `None` | 96,420 |
 
 The encounter CSV contains **192,849** cells with `?` and zero physically empty fields. Literal `None` values in the laboratory columns are counted separately. The notebook reproduces the profile for all 50 columns, patient counts, and original label distribution. [00_data_loading.ipynb](../notebooks/00_data_loading.ipynb)
+
+## 2. Basic Data Cleaning
+
+The cleaning step reads the verified encounter table and applies the rules in [preparation.json](../config/preparation.json). Seven columns use `?` as a missing marker, and `gender` uses `Unknown/Invalid`. The step writes these markers as empty CSV fields.
+
+| Column | Source marker | Cells converted to empty |
+| --- | --- | ---: |
+| `race` | `?` | 2,273 |
+| `weight` | `?` | 98,569 |
+| `payer_code` | `?` | 40,256 |
+| `medical_specialty` | `?` | 49,949 |
+| `diag_1` | `?` | 21 |
+| `diag_2` | `?` | 358 |
+| `diag_3` | `?` | 1,423 |
+| `gender` | `Unknown/Invalid` | 3 |
+| **Total** | | **192,852** |
+
+### Verification
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| Encounters | 101,766 | 101,766 |
+| Patients | 71,518 | 71,518 |
+| Columns | 50 | 50 |
+| Empty CSV fields | 0 | 192,852 |
+| Encounters with at least one empty field | 0 | 100,723 |
+| Literal `None` in `A1Cresult` | 84,748 | 84,748 |
+| Literal `None` in `max_glu_serum` | 96,420 | 96,420 |
+
+The cleaned CSV was read back and checked against the source cell by cell. The comparison verified each replacement and the preservation of every other value, including encounter IDs, patient IDs, original labels, and the order of records and columns. Both source checksums matched the values recorded in Data Loading.
+
+The notebook produces `data/interim/cleaned.csv` and `outputs/preparation/cleaning_audit.csv`. The audit covers all 50 columns. Before cleaning, the reported missing rate counts the configured marker and existing empty fields. After cleaning, it counts empty fields. [01_data_preparation.ipynb](../notebooks/01_data_preparation.ipynb)

@@ -1,0 +1,18 @@
+{
+  "cleaning": {
+    "missing_markers": {
+      "race": "?",
+      "gender": "Unknown/Invalid",
+      "weight": "?",
+      "payer_code": "?",
+      "medical_specialty": "?",
+      "diag_1": "?",
+      "diag_2": "?",
+      "diag_3": "?"
+    },
+    "preserve_literals": {
+      "A1Cresult": "None",
+      "max_glu_serum": "None"
+    }
+  }
+}

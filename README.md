@@ -49,7 +49,7 @@ The full prepared dataset retains two identifiers, 32 predictors, and the origin
 
 The full dataset is stratified by the three original labels using seed `42`, then divided into train, validation, and test sets at approximately 64% / 16% / 20%. Each model dataset contains 32 predictors and `class`.
 
-The raw row count was rechecked by the data-loading notebook. The remaining benchmarks come from the Phase 0 source audit.
+The data-loading and cleaning steps each verified 101,766 encounters and 50 columns. Cleaning converted 192,852 source markers to empty fields. The cohort and split benchmarks come from the Phase 0 source audit.
 
 | Benchmark | Rows |
 | --- | ---: |
@@ -122,7 +122,7 @@ python -m pip install -r requirements.txt
 
 Download `diabetic_data.csv` and `IDS_mapping.csv` from the UCI dataset page and place them in [data/raw/](data/raw/). Direct Python dependencies are listed in [requirements.txt](requirements.txt).
 
-Run [00_data_loading.ipynb](notebooks/00_data_loading.ipynb) from a fresh kernel to verify the source checksums and inspect the schema, patient coverage, and original labels. The data preparation and split/export notebooks follow this step as they become available.
+Run [00_data_loading.ipynb](notebooks/00_data_loading.ipynb) from a fresh kernel to verify the source checksums and inspect the schema, patient coverage, and original labels. Run [01_data_preparation.ipynb](notebooks/01_data_preparation.ipynb) to normalize the approved markers and write the cleaned CSV and its column audit.
 
 According to [.gitignore](.gitignore), data files and files in `outputs/preparation/` remain local. When cloning the repository, prepare the source data and run the workflow to regenerate the outputs.
 
