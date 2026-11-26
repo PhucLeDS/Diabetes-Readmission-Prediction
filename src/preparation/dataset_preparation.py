@@ -16,7 +16,7 @@ from src.paths import (
 from src.preparation.data_cleaning import CLEANED_DATA_PATH, CLEANING_AUDIT_PATH
 from src.preparation.data_loading import (
     COUNT_COLUMNS, ENCOUNTER_COLUMNS, ENCOUNTER_SHA256, ID_COLUMNS,
-    MAPPING_SHA256, TARGET_COLUMN, TARGET_LABELS, RawTable,
+    MAPPING_SHA256, TARGET_COLUMN, TARGET_LABELS, RawTable, parse_ids_mapping,
 )
 from src.validation import validate_required_columns, validate_schema, validate_target, validate_unique_ids
 
@@ -49,29 +49,6 @@ def _numeric_id(value: str, column: str) -> int:
     if not value.isascii() or not value.isdecimal():
         raise ValueError(f"Invalid {column}: {value!r}.")
     return int(value)
-
-
-def _discharge_descriptions(mapping: RawTable) -> dict[str, str]:
-    """Read the discharge section for code validation and audit labels."""
-    code_column, description_column = mapping.columns
-    for index, row in enumerate(mapping.rows):
-        if row[code_column] == DISCHARGE_COLUMN and row[description_column] == "description":
-            break
-    else:
-        raise ValueError("The source mapping has no discharge disposition section.")
-
-    descriptions = {}
-    for row in mapping.rows[index + 1:]:
-        code, description = row[code_column], row[description_column].strip()
-        if not code and not description:
-            break
-        _numeric_id(code, DISCHARGE_COLUMN)
-        if not description or code in descriptions:
-            raise ValueError(f"Missing or duplicate discharge description for code {code!r}.")
-        descriptions[code] = description
-    if not descriptions:
-        raise ValueError("The discharge disposition section has no codes.")
-    return descriptions
 
 
 def _stage_summary(stage: str, rows: list[dict[str, str]], removed: int) -> dict[str, str | int]:
@@ -111,7 +88,7 @@ def select_cohort(
     validate_schema(columns, expected=ENCOUNTER_COLUMNS)
     validate_unique_ids((row["encounter_id"] for row in rows), name="encounter_id")
     validate_target((row[TARGET_COLUMN] for row in rows), allowed=TARGET_LABELS)
-    descriptions = _discharge_descriptions(mapping)
+    descriptions = parse_ids_mapping(mapping, sections=(DISCHARGE_COLUMN,))[DISCHARGE_COLUMN]
     excluded_codes = read_json(config_path)["cohort"]["excluded_discharge_codes"]
     if not isinstance(excluded_codes, list) or any(
         not isinstance(code, str) or code not in descriptions for code in excluded_codes

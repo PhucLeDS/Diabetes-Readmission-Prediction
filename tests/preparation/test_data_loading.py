@@ -87,17 +87,43 @@ class RawLoadingTests(unittest.TestCase):
 
     def test_mapping_is_loaded_as_original_text_rows(self):
         path = self.directory / "IDS_mapping.csv"
-        payload = b'admission_type_id,description\n1,Emergency\n,\nadmission_source_id,description\n7,"Emergency, room"\n'
+        payload = (
+            b"admission_type_id,description\n1,Emergency\n2,Not Available\n,\n"
+            b"discharge_disposition_id,description\n1,NULL\n2,Not Mapped\n,\n"
+            b'admission_source_id,description\n1,Unknown/Invalid\n7," Emergency, room "\n'
+        )
         path.write_bytes(payload)
         with (
             patch.object(data_loading, "MAPPING_SHA256", sha256(payload).hexdigest()),
-            patch.object(data_loading, "MAPPING_ROWS", 4),
+            patch.object(data_loading, "MAPPING_ROWS", 10),
         ):
             table = data_loading.load_ids_mapping(path)
-        self.assertEqual(table.rows[1], {"admission_type_id": "", "description": ""})
-        self.assertEqual(table.rows[2]["admission_type_id"], "admission_source_id")
-        self.assertEqual(table.rows[3]["description"], "Emergency, room")
+        self.assertEqual(table.rows[2], {"admission_type_id": "", "description": ""})
+        self.assertEqual(table.rows[7]["admission_type_id"], "admission_source_id")
+        self.assertEqual(table.rows[9]["description"], " Emergency, room ")
+        self.assertEqual(data_loading.parse_ids_mapping(table, sections=data_loading.MAPPING_SECTIONS), {
+            "admission_type_id": {"1": "Emergency", "2": "Not Available"},
+            "discharge_disposition_id": {"1": "NULL", "2": "Not Mapped"},
+            "admission_source_id": {"1": "Unknown/Invalid", "7": "Emergency, room"},
+        })
         self.assertEqual(path.read_bytes(), payload)
+
+    def test_lookup_validation_applies_to_the_requested_sections(self):
+        columns = data_loading.MAPPING_COLUMNS
+        valid_discharge = ("discharge_disposition_id", "description"), ("1", "Home")
+        cases = (
+            ((), "No mapping entries found"),
+            ((*valid_discharge, ("1", "Another description")), "Duplicate lookup code"),
+            ((*valid_discharge, ("2", " ")), "Invalid lookup entry"),
+            ((*valid_discharge, ("-2", "Invalid code")), "Invalid lookup entry"),
+        )
+        for entries, error in cases:
+            with self.subTest(entries=entries):
+                lookup_rows = [dict(zip(columns, entry, strict=True)) for entry in entries]
+                records = [{"admission_type_id": "3", "description": ""}, *lookup_rows]
+                table = data_loading.RawTable(Path("mapping.csv"), "", 0, list(columns), records)
+                with self.assertRaisesRegex(ValueError, f"{error} for discharge_disposition_id"):
+                    data_loading.parse_ids_mapping(table, sections=("discharge_disposition_id",))
 
 
 if __name__ == "__main__":

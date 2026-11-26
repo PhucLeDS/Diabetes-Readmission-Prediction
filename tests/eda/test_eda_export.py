@@ -6,10 +6,32 @@ from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import SkipTest, TestCase
+from unittest.mock import patch
 
+import pandas as pd
+
+from src.eda.data import _admission_descriptions
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
 from src.io_utils import read_csv, read_json, sha256_file
 from src.paths import PROJECT_ROOT
+from src.preparation.data_loading import MAPPING_COLUMNS, RawTable
+
+
+class AdmissionLookupTests(TestCase):
+    def test_distinguishes_unmapped_codes_from_unclear_descriptions(self) -> None:
+        entries = (
+            ("6", "NULL"), ("", ""), ("admission_source_id", "description"), ("7", "Emergency Room"),
+        )
+        rows = [dict(zip(MAPPING_COLUMNS, entry, strict=True)) for entry in entries]
+        table = RawTable(Path("mapping.csv"), "", 0, list(MAPPING_COLUMNS), rows)
+        cohort = pd.DataFrame({"admission_type_id": ["6", "99"], "admission_source_id": ["7", ""]})
+        with patch("src.eda.data.load_ids_mapping", return_value=table):
+            lookup = _admission_descriptions(cohort, table.path).set_index(["column", "code"])
+        self.assertEqual(lookup.loc[("admission_type_id", "6"), "description"], "NULL")
+        self.assertEqual(lookup.loc[("admission_type_id", "6"), "lookup_status"], "Unclear description")
+        self.assertEqual(lookup.loc[("admission_type_id", "99"), "description"], "")
+        self.assertEqual(lookup.loc[("admission_type_id", "99"), "lookup_status"], "Unmapped code")
+        self.assertEqual(lookup.loc[("admission_source_id", "7"), "lookup_status"], "Mapped")
 
 
 class EdaExportTests(TestCase):

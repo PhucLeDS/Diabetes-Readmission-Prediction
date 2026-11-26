@@ -7,7 +7,7 @@ import pandas as pd
 
 from src.io_utils import read_csv, read_json, sha256_file
 from src.paths import IDS_MAPPING_PATH, PROJECT_ROOT
-from src.preparation.data_loading import COUNT_COLUMNS, ID_COLUMNS, TARGET_COLUMN, load_ids_mapping
+from src.preparation.data_loading import COUNT_COLUMNS, ID_COLUMNS, TARGET_COLUMN, load_ids_mapping, parse_ids_mapping
 from src.preparation.dataset_export import load_full_prepared
 from src.preparation.dataset_preparation import (
     FEATURE_AUDIT_PATH,
@@ -83,26 +83,9 @@ class EdaInputs:
 
 
 def _admission_descriptions(cohort: pd.DataFrame, mapping_path: Path) -> pd.DataFrame:
-    mapping = load_ids_mapping(mapping_path)
-    code_field, description_field = mapping.columns
-    descriptions: dict[str, dict[str, str]] = {column: {} for column in ADMISSION_COLUMNS}
-    section = code_field
-
-    for row in mapping.rows:
-        code, description = row[code_field].strip(), row[description_field].strip()
-        if description == "description":
-            section = code
-            continue
-        if not (code or description) or section not in descriptions:
-            continue
-        if not (code.isascii() and code.isdecimal() and description) or code in descriptions[section]:
-            raise ValueError(f"Invalid or duplicate lookup entry for {section}: {code!r}.")
-        descriptions[section][code] = description
-
+    descriptions = parse_ids_mapping(load_ids_mapping(mapping_path), sections=ADMISSION_COLUMNS)
     records = []
     for column, lookup in descriptions.items():
-        if not lookup:
-            raise ValueError(f"No mapping entries found for {column}.")
         observed_codes = set(cohort[column].unique()) - {""}
         for code in sorted(observed_codes | lookup.keys(), key=lambda value: (len(value), value)):
             description = lookup.get(code, "")

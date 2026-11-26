@@ -1,6 +1,7 @@
 """Load and inspect the unmodified UCI source tables."""
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,7 @@ ENCOUNTER_COLUMNS = (
     "readmitted",
 )
 MAPPING_COLUMNS = ("admission_type_id", "description")
+MAPPING_SECTIONS = ("admission_type_id", "discharge_disposition_id", "admission_source_id")
 ID_COLUMNS = ("encounter_id", "patient_nbr")
 COUNT_COLUMNS = (
     "time_in_hospital", "num_lab_procedures", "num_procedures", "num_medications",
@@ -93,6 +95,31 @@ def load_ids_mapping(path: Path = IDS_MAPPING_PATH) -> RawTable:
         path, expected_columns=MAPPING_COLUMNS, expected_rows=MAPPING_ROWS,
         expected_sha256=MAPPING_SHA256,
     )
+
+
+def parse_ids_mapping(mapping: RawTable, *, sections: Sequence[str]) -> dict[str, dict[str, str]]:
+    """Validate and return lookup entries for the requested source sections."""
+    code_field, description_field = MAPPING_COLUMNS
+    descriptions: dict[str, dict[str, str]] = {section: {} for section in sections}
+    current_section = code_field
+    for row in mapping.rows:
+        code, description = row[code_field], row[description_field].strip()
+        if code in MAPPING_SECTIONS and description == description_field:
+            current_section = code
+            continue
+        if current_section not in descriptions or not (code or description):
+            continue
+        lookup = descriptions[current_section]
+        if not (code.isascii() and code.isdecimal() and description):
+            raise ValueError(f"Invalid lookup entry for {current_section}: {code!r}.")
+        if code in lookup:
+            raise ValueError(f"Duplicate lookup code for {current_section}: {code!r}.")
+        lookup[code] = description
+
+    for section, lookup in descriptions.items():
+        if not lookup:
+            raise ValueError(f"No mapping entries found for {section}.")
+    return descriptions
 
 
 def summarize_raw_encounters(table: RawTable) -> dict:
