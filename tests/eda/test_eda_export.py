@@ -1,4 +1,4 @@
-"""Check the aggregate EDA bundle and its write behavior."""
+"""Check the aggregate EDA bundle."""
 
 from collections import Counter
 from hashlib import sha256
@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import SkipTest, TestCase
 
-from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, _write_artifacts, export_eda
+from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
 from src.io_utils import read_csv, read_json, sha256_file
 from src.paths import PROJECT_ROOT
 
@@ -25,10 +25,15 @@ class EdaExportTests(TestCase):
         manifest = read_json(self.output_dir / MANIFEST_PATH)
         self.assertEqual(manifest["scope"]["patients"], 69_990)
         self.assertEqual(manifest["runtime"]["matplotlib"], version("matplotlib"))
-        for record in manifest["inputs"].values():
+        self.assertEqual(manifest["inputs"].keys(), INPUT_PATHS.keys())
+        for name, record in manifest["inputs"].items():
+            self.assertEqual(record["path"], INPUT_PATHS[name].relative_to(PROJECT_ROOT).as_posix())
             content = (PROJECT_ROOT / record["path"]).read_bytes()
-            if record["checksum_mode"] == "LF line endings":
+            if name in {"preparation_config", "target_config"}:
+                self.assertEqual(record["checksum_mode"], "LF line endings")
                 content = content.replace(b"\r\n", b"\n")
+            else:
+                self.assertEqual(record["checksum_mode"], "exact file bytes")
             self.assertEqual(record["sha256"], sha256(content).hexdigest())
 
         files = {
@@ -67,20 +72,3 @@ class EdaExportTests(TestCase):
         findings = {row["finding"]: row for row in table("eda_findings")}
         self.assertIn("28,511/69,990", findings["Any Readmission"]["evidence"])
         self.assertIn("54,041/69,990", findings["Laboratory coverage"]["evidence"])
-
-
-class EdaOutputWriteTests(TestCase):
-    def test_conflict_preserves_existing_files_until_overwrite_is_requested(self) -> None:
-        with TemporaryDirectory(prefix="eda-output-conflict-") as directory:
-            root = Path(directory)
-            existing = root / "already.csv"
-            existing.write_bytes(b"old")
-            files = {Path("new.csv"): b"new", Path("already.csv"): b"replacement"}
-            with self.assertRaisesRegex(FileExistsError, "--overwrite"):
-                _write_artifacts(root, files, overwrite=False)
-            self.assertEqual(existing.read_bytes(), b"old")
-            self.assertFalse((root / "new.csv").exists())
-            _write_artifacts(root, files, overwrite=True)
-            _write_artifacts(root, files, overwrite=False)
-            self.assertEqual(existing.read_bytes(), b"replacement")
-            self.assertEqual((root / "new.csv").read_bytes(), b"new")

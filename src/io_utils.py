@@ -4,7 +4,7 @@ import csv
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from filecmp import cmp
 from pathlib import Path
@@ -27,6 +27,26 @@ def sha256_file(path: Path) -> str:
     """Return the SHA-256 digest of the exact file bytes."""
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def input_checksums(
+    paths: Mapping[str, Path], *, root: Path, normalize_lf: Collection[str] = (),
+) -> dict[str, dict[str, str]]:
+    """Record input hashes, normalizing CRLF only for the specified keys."""
+    checksums = {}
+    for name, path in paths.items():
+        if name in normalize_lf:
+            digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+            mode = "LF line endings"
+        else:
+            digest = sha256_file(path)
+            mode = "exact file bytes"
+        checksums[name] = {
+            "path": path.relative_to(root).as_posix(),
+            "sha256": digest,
+            "checksum_mode": mode,
+        }
+    return checksums
 
 
 def read_csv(
@@ -137,3 +157,24 @@ def write_bytes(path: Path, data: bytes, *, overwrite: bool = False) -> Path:
     with _temporary_output(path, overwrite=overwrite) as temporary_path:
         temporary_path.write_bytes(data)
     return path
+
+
+def write_artifacts(
+    output_dir: Path, artifacts: Mapping[Path, bytes], *, overwrite: bool = False,
+) -> None:
+    """Check all destinations for conflicts, then publish each changed file."""
+    pending = []
+    for relative, content in artifacts.items():
+        path = output_dir / relative
+        try:
+            existing = path.read_bytes()
+        except FileNotFoundError:
+            existing = None
+        if existing == content:
+            continue
+        if existing is not None and not overwrite:
+            raise FileExistsError(f"Existing output differs: {path}")
+        pending.append((path, content))
+
+    for path, content in pending:
+        write_bytes(path, content, overwrite=overwrite)

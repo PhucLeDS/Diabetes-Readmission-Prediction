@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src import io_utils, paths, validation
 
@@ -116,6 +117,50 @@ class FileTests(unittest.TestCase):
             io_utils.write_json(target, {"missing": float("nan")})
         self.assertFalse(target.exists())
         self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_artifact_conflict_is_checked_before_any_write(self):
+        existing = self.directory / "existing.png"
+        new = self.directory / "tables" / "new.csv"
+        existing.write_bytes(b"old image")
+        artifacts = {
+            new.relative_to(self.directory): b"value\n1\n",
+            existing.relative_to(self.directory): b"new image",
+        }
+        with self.assertRaisesRegex(FileExistsError, "existing.png"):
+            io_utils.write_artifacts(self.directory, artifacts)
+        self.assertEqual(existing.read_bytes(), b"old image")
+        self.assertFalse(new.parent.exists())
+
+        io_utils.write_artifacts(self.directory, artifacts, overwrite=True)
+        self.assertEqual(existing.read_bytes(), b"new image")
+        self.assertEqual(new.read_bytes(), b"value\n1\n")
+
+        with patch.object(io_utils, "write_bytes") as writer:
+            io_utils.write_artifacts(self.directory, artifacts)
+            io_utils.write_artifacts(self.directory, artifacts, overwrite=True)
+            writer.assert_not_called()
+
+    def test_artifact_retry_completes_partial_export(self):
+        data = self.directory / "table.csv"
+        manifest = self.directory / "manifest.json"
+        artifacts = {Path("table.csv"): b"value\n1\n", Path("manifest.json"): b"{}\n"}
+        write_bytes = io_utils.write_bytes
+
+        def fail_on_manifest(path, content, *, overwrite):
+            if path == manifest:
+                raise OSError("Simulated interruption")
+            return write_bytes(path, content, overwrite=overwrite)
+
+        with patch.object(io_utils, "write_bytes", side_effect=fail_on_manifest):
+            with self.assertRaisesRegex(OSError, "Simulated interruption"):
+                io_utils.write_artifacts(self.directory, artifacts)
+        self.assertEqual(data.read_bytes(), b"value\n1\n")
+        self.assertFalse(manifest.exists())
+
+        with patch.object(io_utils, "write_bytes", wraps=write_bytes) as writer:
+            io_utils.write_artifacts(self.directory, artifacts)
+            writer.assert_called_once_with(manifest, b"{}\n", overwrite=False)
+        self.assertEqual(manifest.read_bytes(), b"{}\n")
 
 
 class ValidationTests(unittest.TestCase):

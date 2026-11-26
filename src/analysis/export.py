@@ -18,7 +18,7 @@ from src.analysis.data import ANALYSIS_CONFIG_PATH, AnalysisInputs, load_analysi
 from src.analysis.evaluation import build_evaluation_map
 from src.analysis.prior_visits import profile_prior_visits
 from src.analysis.rule_comparisons import compare_rule_conditions
-from src.io_utils import sha256_file, write_bytes
+from src.io_utils import input_checksums, write_artifacts
 from src.paths import OUTPUT_DIR, PROJECT_ROOT
 from src.preparation.dataset_export import CLASS_LABELS, TARGET_MAPPING_CONFIG_PATH
 from src.preparation.dataset_preparation import (
@@ -39,22 +39,7 @@ INPUT_PATHS = {
     "preparation_config": PREPARATION_CONFIG_PATH,
     "target_config": TARGET_MAPPING_CONFIG_PATH,
 }
-
-
-def _input_checksums() -> dict:
-    checksums = {}
-    for name, path in INPUT_PATHS.items():
-        normalized = path.parent == ANALYSIS_CONFIG_PATH.parent
-        if normalized:
-            digest = sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-        else:
-            digest = sha256_file(path)
-        checksums[name] = {
-            "path": path.relative_to(PROJECT_ROOT).as_posix(),
-            "sha256": digest,
-            "checksum_mode": "LF line endings" if normalized else "exact file bytes",
-        }
-    return checksums
+LF_INPUTS = ("analysis_config", "preparation_config", "target_config")
 
 
 def _analysis_tables(analysis: AnalysisInputs) -> dict[str, pd.DataFrame]:
@@ -158,26 +143,10 @@ def _analysis_manifest(analysis: AnalysisInputs, inputs: dict, artifacts: dict[P
     }
 
 
-def _write_artifacts(output_dir: Path, artifacts: dict[Path, bytes], *, overwrite: bool) -> None:
-    to_write = []
-    for relative, content in artifacts.items():
-        path = output_dir / relative
-        if path.exists():
-            if path.read_bytes() == content:
-                continue
-            if not overwrite:
-                raise FileExistsError(
-                    f"Existing Analysis output differs: {path}. Use --overwrite or another --output-dir."
-                )
-        to_write.append((path, content))
-    for path, content in to_write:
-        write_bytes(path, content, overwrite=overwrite)
-
-
 def export_analysis(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Path:
     """Export the notebook's aggregate results using the verified cohort."""
     matplotlib.use("Agg")
-    inputs = _input_checksums()
+    inputs = input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS)
     analysis = load_analysis_inputs()
     tables = _analysis_tables(analysis)
     artifacts = {
@@ -185,12 +154,12 @@ def export_analysis(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -
         for name, table in tables.items()
     }
     artifacts.update(_figure_artifacts(tables))
-    if inputs != _input_checksums():
+    if inputs != input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS):
         raise RuntimeError("An Analysis input changed during export.")
 
     manifest = _analysis_manifest(analysis, inputs, artifacts)
     artifacts[MANIFEST_PATH] = (json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    _write_artifacts(output_dir, artifacts, overwrite=overwrite)
+    write_artifacts(output_dir, artifacts, overwrite=overwrite)
     return output_dir / MANIFEST_PATH
 
 
@@ -202,7 +171,7 @@ def main() -> None:
     try:
         manifest = export_analysis(args.output_dir, overwrite=args.overwrite)
     except FileExistsError as error:
-        parser.exit(1, f"{error}\n")
+        parser.exit(1, f"{error}. Use --overwrite or another --output-dir.\n")
     print(f"Analysis manifest: {manifest}")
 
 
