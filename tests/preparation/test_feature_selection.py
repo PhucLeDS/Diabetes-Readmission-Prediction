@@ -1,9 +1,10 @@
 """Check the approved predictor schema, projection, and audit."""
 
-from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+
+import pandas as pd
 
 from src.io_utils import read_csv, read_json, write_json
 from src.preparation.data_loading import ENCOUNTER_COLUMNS
@@ -60,19 +61,17 @@ class FeatureSelectionTests(TestCase):
             encounter_id="001", patient_nbr="007", readmitted="<30",
             weight="", race="", A1Cresult="None", diag_1="250.01", diag_2="", diag_3="401",
         )
-        self.grouped = group_diagnoses(ENCOUNTER_COLUMNS, [row])
+        self.grouped = group_diagnoses(pd.DataFrame([row], dtype="string"))
 
     def test_applies_approved_order_and_preserves_selected_values(self):
-        before = deepcopy(self.grouped.rows)
+        before = self.grouped.frame.copy()
         result = select_predictors(self.grouped)
-        expected_columns = ("encounter_id", "patient_nbr", *EXPECTED_PREDICTORS, "readmitted")
-        self.assertEqual(result.columns, expected_columns)
-        self.assertEqual(tuple(result.rows[0]), expected_columns)
-        self.assertEqual(result.rows[0], {column: before[0][column] for column in expected_columns})
-        self.assertEqual(self.grouped.rows, before)
-        self.assertEqual(result.rows[0]["diag_2_group"], "Missing")
-        self.assertEqual(result.rows[0]["A1Cresult"], "None")
-        self.assertEqual(result.rows[0]["readmitted"], "<30")
+        expected_columns = ["encounter_id", "patient_nbr", *EXPECTED_PREDICTORS, "readmitted"]
+        pd.testing.assert_frame_equal(result.frame, before.loc[:, expected_columns])
+        pd.testing.assert_frame_equal(self.grouped.frame, before)
+        self.assertEqual(result.frame.at[0, "diag_2_group"], "Missing")
+        self.assertEqual(result.frame.at[0, "A1Cresult"], "None")
+        self.assertEqual(result.frame.at[0, "readmitted"], "<30")
 
     def test_rejects_invalid_feature_configurations(self):
         path = self.directory / "preparation.json"
@@ -96,20 +95,20 @@ class FeatureSelectionTests(TestCase):
 
     def test_audit_distinguishes_removed_replaced_and_uncreated_columns(self):
         result = select_predictors(self.grouped)
-        audit = {entry["column"]: entry for entry in result.audit}
+        audit = result.audit.set_index("column")
         self.assertEqual(len(audit), 60)
-        self.assertEqual(audit["weight"]["action"], "drop_source")
-        self.assertEqual(audit["weight"]["empty_before"], 1)
-        self.assertIsNone(audit["weight"]["empty_after"])
-        self.assertEqual(audit["diag_2"]["action"], "replaced_diagnosis")
-        self.assertEqual(audit["diag_2"]["output_column"], "diag_2_group")
-        self.assertEqual(audit["diag_2"]["empty_before"], 1)
-        self.assertEqual(audit["diag_2_group"]["empty_after"], 0)
-        self.assertEqual(audit["total_prior_visits"]["action"], "not_created")
-        self.assertIsNone(audit["total_prior_visits"]["rows_before"])
-        self.assertEqual(audit["readmitted"]["output_position"], 35)
-        self.assertEqual(audit["race"]["empty_after"], 1)
-        self.assertEqual(sum(entry["logical_type"] == "numeric" for entry in audit.values()), 8)
+        self.assertEqual(audit.at["weight", "action"], "drop_source")
+        self.assertEqual(audit.at["weight", "empty_before"], 1)
+        self.assertTrue(pd.isna(audit.at["weight", "empty_after"]))
+        self.assertEqual(audit.at["diag_2", "action"], "replaced_diagnosis")
+        self.assertEqual(audit.at["diag_2", "output_column"], "diag_2_group")
+        self.assertEqual(audit.at["diag_2", "empty_before"], 1)
+        self.assertEqual(audit.at["diag_2_group", "empty_after"], 0)
+        self.assertEqual(audit.at["total_prior_visits", "action"], "not_created")
+        self.assertTrue(pd.isna(audit.at["total_prior_visits", "rows_before"]))
+        self.assertEqual(audit.at["readmitted", "output_position"], 35)
+        self.assertEqual(audit.at["race", "empty_after"], 1)
+        self.assertEqual(audit["logical_type"].eq("numeric").sum(), 8)
 
         path = self.directory / "feature_audit.csv"
         save_feature_audit(result, audit_path=path)
@@ -117,3 +116,6 @@ class FeatureSelectionTests(TestCase):
         columns, rows = read_csv(path)
         self.assertEqual(columns, list(FEATURE_AUDIT_COLUMNS))
         self.assertEqual(len(rows), len(audit))
+        by_name = {row["column"]: row for row in rows}
+        self.assertEqual(by_name["readmitted"]["output_position"], "35")
+        self.assertEqual(by_name["weight"]["empty_after"], "")

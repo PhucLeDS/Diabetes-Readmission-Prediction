@@ -1,9 +1,10 @@
 """Check cohort filtering, representative selection, and aggregate audit output."""
 
-from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+
+import pandas as pd
 
 from src.io_utils import read_csv
 from src.preparation.data_loading import ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
@@ -20,37 +21,38 @@ class CohortTests(TestCase):
             ("4", "200", "13", "NO"),
             ("3", "300", "25", "NO"),
         ]
-        self.rows = []
+        rows = []
         for encounter, patient, discharge, label in values:
             row = dict.fromkeys(ENCOUNTER_COLUMNS, "0")
             row.update(
                 encounter_id=encounter, patient_nbr=patient,
                 discharge_disposition_id=discharge, readmitted=label,
             )
-            self.rows.append(row)
-        self.rows[0]["race"] = self.rows[2]["race"] = ""
+            rows.append(row)
+        self.frame = pd.DataFrame(rows, dtype="string")
+        self.frame.loc[[0, 2], "race"] = ""
         self.mapping = RawTable(
-            Path("IDS_mapping.csv"), "", 0, list(MAPPING_COLUMNS),
-            [
-                dict(zip(MAPPING_COLUMNS, pair, strict=True))
-                for pair in (
+            Path("IDS_mapping.csv"), "", 0,
+            pd.DataFrame(
+                (
                     ("1", "Emergency"), ("", ""),
                     ("discharge_disposition_id", "description"),
                     ("1", "Home"), ("11", "Expired"), ("13", "Hospice"),
                     ("14", "Hospice"), ("18", "NULL"), ("19", "Expired"),
                     ("20", "Expired"), ("21", "Expired"), ("25", "Not Mapped"),
                     ("", ""), ("admission_source_id", "description"),
-                )
-            ],
+                ),
+                columns=MAPPING_COLUMNS, dtype="string",
+            ),
         )
 
     def test_filters_before_selection_and_ranks_numerically(self):
-        before = deepcopy(self.rows)
-        result = select_cohort(ENCOUNTER_COLUMNS, self.rows, self.mapping)
-        reordered = select_cohort(ENCOUNTER_COLUMNS, list(reversed(self.rows)), self.mapping)
-        self.assertEqual(result.rows, [before[2], before[4]])
-        self.assertEqual(result.rows, reordered.rows)
-        self.assertEqual(self.rows, before)
+        before = self.frame.copy()
+        result = select_cohort(self.frame, self.mapping)
+        reordered = select_cohort(self.frame.iloc[::-1], self.mapping)
+        pd.testing.assert_frame_equal(result.frame, before.iloc[[2, 4]].reset_index(drop=True))
+        pd.testing.assert_frame_equal(result.frame, reordered.frame)
+        pd.testing.assert_frame_equal(self.frame, before)
         self.assertEqual(result.excluded_by_code, {"11": 1, "13": 1, "14": 0, "19": 0, "20": 0, "21": 0})
         self.assertEqual(result.unclear_retained_by_code, {"18": 1, "25": 1})
         self.assertEqual(
@@ -63,26 +65,40 @@ class CohortTests(TestCase):
 
     def test_rejects_duplicate_encounter_and_unmapped_discharge(self):
         with self.assertRaisesRegex(ValueError, "Duplicate encounter_id"):
-            select_cohort(ENCOUNTER_COLUMNS, self.rows + [self.rows[0]], self.mapping)
-        self.rows[0]["discharge_disposition_id"] = "97"
+            select_cohort(self.frame.iloc[[0, 0]], self.mapping)
+        self.frame.at[0, "discharge_disposition_id"] = "97"
         with self.assertRaisesRegex(ValueError, "Unmapped discharge disposition code"):
-            select_cohort(ENCOUNTER_COLUMNS, self.rows, self.mapping)
+            select_cohort(self.frame, self.mapping)
 
     def test_rejects_invalid_patient_and_original_label(self):
-        bad_label = [self.rows[0] | {"readmitted": "OTHER"}]
+        bad_label = self.frame.iloc[:1].assign(readmitted="OTHER")
         with self.assertRaisesRegex(ValueError, "Unexpected target value"):
-            select_cohort(ENCOUNTER_COLUMNS, bad_label, self.mapping)
-        bad_patient = [self.rows[0] | {"patient_nbr": ""}]
+            select_cohort(bad_label, self.mapping)
+        bad_patient = self.frame.iloc[:1].assign(patient_nbr="")
         with self.assertRaisesRegex(ValueError, "Invalid patient_nbr"):
-            select_cohort(ENCOUNTER_COLUMNS, bad_patient, self.mapping)
+            select_cohort(bad_patient, self.mapping)
+
+    def test_numeric_order_preserves_large_ids_and_breaks_ties_by_original_text(self):
+        frame = self.frame.iloc[[1, 1, 1, 1]].reset_index(drop=True)
+        frame["encounter_id"] = pd.array([
+            "018446744073709551617", "18446744073709551617", "18446744073709551616", "10",
+        ], dtype="string")
+        frame["patient_nbr"] = pd.array(["100", "100", "100", "200"], dtype="string")
+        result = select_cohort(frame, self.mapping)
+        self.assertEqual(result.frame["encounter_id"].tolist(), ["10", "18446744073709551616"])
+
+        tied = select_cohort(frame.iloc[[1, 0, 3]], self.mapping)
+        self.assertEqual(tied.frame["encounter_id"].tolist(), ["10", "018446744073709551617"])
 
     def test_writes_cohort_and_column_audit(self):
-        result = select_cohort(ENCOUNTER_COLUMNS, self.rows, self.mapping)
+        result = select_cohort(self.frame, self.mapping)
         cohort_path = self.directory / "cohort.csv"
         audit_path = self.directory / "cohort_audit.csv"
         for _ in range(2):
             save_cohort_result(result, cohort_path=cohort_path, audit_path=audit_path)
-        self.assertEqual(read_csv(cohort_path), (list(ENCOUNTER_COLUMNS), [self.rows[2], self.rows[4]]))
+        self.assertEqual(
+            read_csv(cohort_path), (list(ENCOUNTER_COLUMNS), self.frame.iloc[[2, 4]].to_dict(orient="records")),
+        )
         header, audit = read_csv(audit_path)
         self.assertEqual(header, list(AUDIT_COLUMNS))
         self.assertEqual([row["column"] for row in audit], list(ENCOUNTER_COLUMNS))

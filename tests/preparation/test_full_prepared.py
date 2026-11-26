@@ -6,6 +6,8 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+import pandas as pd
+
 from src.io_utils import read_json, write_json
 
 from src.preparation.data_loading import ENCOUNTER_COLUMNS
@@ -28,10 +30,10 @@ class FullPreparedTests(TestCase):
         )
         second = first | {"encounter_id": "20", "patient_nbr": "102", "readmitted": "NO", "race": "Other"}
         self.cohort = CohortResult(
-            columns=ENCOUNTER_COLUMNS, rows=[first, second],
-            flow=[], excluded_by_code={}, unclear_retained_by_code={}, audit=[],
+            frame=pd.DataFrame([first, second], dtype="string"),
+            flow=[], excluded_by_code={}, unclear_retained_by_code={}, audit=pd.DataFrame(),
         )
-        self.selection = select_predictors(group_diagnoses(self.cohort.columns, self.cohort.rows))
+        self.selection = select_predictors(group_diagnoses(self.cohort.frame))
 
     def test_validation_reports_original_labels_and_empty_fields(self):
         statistics = validate_full_prepared(self.selection, self.cohort)
@@ -42,21 +44,22 @@ class FullPreparedTests(TestCase):
         self.assertEqual(statistics["rows_with_empty_fields"], 1)
 
     def test_validation_rejects_changed_values_and_grouping(self):
-        row = self.selection.rows[0]
+        frame = self.selection.frame
         for column, value in (("readmitted", "NO"), ("diag_2_group", "Unmapped"), ("A1Cresult", "")):
             with self.subTest(column=column):
-                original = row[column]
-                row[column] = value
+                original = frame.at[0, column]
+                frame.at[0, column] = value
                 with self.assertRaisesRegex(ValueError, f"differs from the cohort.*{column}"):
                     validate_full_prepared(self.selection, self.cohort)
-                row[column] = original
+                frame.at[0, column] = original
 
     def test_validation_rejects_reordered_rows_and_duplicate_patients(self):
-        self.selection.rows.reverse()
+        original = self.selection.frame
+        self.selection.frame = original.iloc[::-1]
         with self.assertRaisesRegex(ValueError, "differs from the cohort.*encounter_id"):
             validate_full_prepared(self.selection, self.cohort)
-        self.selection.rows.reverse()
-        self.selection.rows[1]["patient_nbr"] = "101"
+        self.selection.frame = original
+        self.selection.frame.at[1, "patient_nbr"] = "101"
         with self.assertRaisesRegex(ValueError, "Duplicate prepared patient_nbr"):
             validate_full_prepared(self.selection, self.cohort)
 

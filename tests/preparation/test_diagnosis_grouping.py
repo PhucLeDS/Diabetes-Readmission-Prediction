@@ -1,7 +1,8 @@
 """Check fixed ICD-9 rules and diagnosis replacement."""
 
-from copy import deepcopy
 from unittest import TestCase
+
+import pandas as pd
 
 from src.preparation.data_loading import ENCOUNTER_COLUMNS
 from src.preparation.dataset_preparation import DIAGNOSIS_COLUMNS, group_diagnoses, group_icd9
@@ -45,21 +46,19 @@ class DiagnosisGroupingTests(TestCase):
             row | {"diag_1": "250.01", "diag_2": "", "diag_3": "E800"},
             row | {"diag_1": "invalid", "diag_2": "V12", "diag_3": "250"},
         ]
-        before = deepcopy(rows)
-        result = group_diagnoses(ENCOUNTER_COLUMNS, rows)
-        self.assertEqual(rows, before)
+        frame = pd.DataFrame(rows, dtype="string")
+        before = frame.copy()
+        result = group_diagnoses(frame)
+        pd.testing.assert_frame_equal(frame, before)
         expected_columns = tuple(
             f"{column}_group" if column in DIAGNOSIS_COLUMNS else column for column in ENCOUNTER_COLUMNS
         )
-        self.assertEqual(result.columns, expected_columns)
-        for source, grouped in zip(before, result.rows, strict=True):
-            self.assertEqual(tuple(grouped), result.columns)
-            for column in ENCOUNTER_COLUMNS:
-                if column not in DIAGNOSIS_COLUMNS:
-                    self.assertEqual(grouped[column], source[column])
+        self.assertEqual(tuple(result.frame.columns), expected_columns)
+        retained = [column for column in ENCOUNTER_COLUMNS if column not in DIAGNOSIS_COLUMNS]
+        pd.testing.assert_frame_equal(result.frame.loc[:, retained], before.loc[:, retained])
         self.assertEqual(result.group_counts["diag_1_group"]["Diabetes"], 1)
         self.assertEqual(result.group_counts["diag_1_group"]["Unmapped"], 1)
         self.assertEqual(result.group_counts["diag_2_group"]["Missing"], 1)
         self.assertEqual(result.group_counts["diag_2_group"]["Other_V"], 1)
         self.assertEqual(result.group_counts["diag_3_group"]["Other_E"], 1)
-        self.assertTrue(all(sum(counts.values()) == 2 for counts in result.group_counts.values()))
+        self.assertTrue(result.group_counts.sum().eq(2).all())

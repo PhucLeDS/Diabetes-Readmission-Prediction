@@ -1,14 +1,15 @@
 """Select one eligible encounter per patient and audit the cohort."""
 
 import re
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from platform import python_version
 
-from src.io_utils import CsvValue, read_csv, read_json, sha256_file, write_csv, write_json
+import pandas as pd
+
+from src.io_utils import CsvValue, read_csv_frame, read_json, sha256_file, write_csv_frame, write_json
 from src.paths import (
     CONFIG_DIR, IDS_MAPPING_PATH, INTERIM_DIR, PREPARATION_OUTPUT_DIR,
     PROCESSED_DIR, PROJECT_ROOT, RAW_DATA_PATH,
@@ -37,99 +38,91 @@ AUDIT_COLUMNS = (
 class CohortResult:
     """Selected records and aggregate evidence for each selection step."""
 
-    columns: tuple[str, ...]
-    rows: list[dict[str, str]]
+    frame: pd.DataFrame
     flow: list[dict[str, str | int]]
     excluded_by_code: dict[str, int]
     unclear_retained_by_code: dict[str, int]
-    audit: list[dict[str, CsvValue]]
+    audit: pd.DataFrame
 
 
-def _numeric_id(value: str, column: str) -> int:
-    if not value.isascii() or not value.isdecimal():
-        raise ValueError(f"Invalid {column}: {value!r}.")
-    return int(value)
-
-
-def _stage_summary(stage: str, rows: list[dict[str, str]], removed: int) -> dict[str, str | int]:
-    labels = Counter(row[TARGET_COLUMN] for row in rows)
+def _stage_summary(stage: str, frame: pd.DataFrame, removed: int) -> dict[str, str | int]:
+    labels = frame[TARGET_COLUMN].value_counts()
     return {
         "stage": stage,
-        "encounters": len(rows),
-        "patients": len({row["patient_nbr"] for row in rows}),
+        "encounters": len(frame),
+        "patients": int(frame["patient_nbr"].nunique()),
         "removed": removed,
-        **{label: labels[label] for label in TARGET_LABELS},
+        **{label: int(labels.get(label, 0)) for label in TARGET_LABELS},
     }
 
 
 def _column_audit(
-    columns: Sequence[str], stages: dict[str, list[dict[str, str]]],
-) -> list[dict[str, CsvValue]]:
-    result = []
-    for column in columns:
-        record: dict[str, CsvValue] = {"column": column}
-        for stage, rows in stages.items():
-            empty = sum(row[column] == "" for row in rows)
-            record[f"{stage}_rows"] = len(rows)
-            record[f"{stage}_empty"] = empty
-            record[f"{stage}_missing_rate"] = empty / len(rows) if rows else None
-        result.append(record)
-    return result
+    columns: Sequence[str], stages: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    audit = pd.DataFrame({"column": columns})
+    for stage, frame in stages.items():
+        empty = frame.eq("").sum().to_numpy()
+        audit[f"{stage}_rows"] = len(frame)
+        audit[f"{stage}_empty"] = empty
+        audit[f"{stage}_missing_rate"] = empty / len(frame) if len(frame) else None
+    return audit.loc[:, list(AUDIT_COLUMNS)]
 
 
 def select_cohort(
-    columns: Sequence[str],
-    rows: list[dict[str, str]],
+    frame: pd.DataFrame,
     mapping: RawTable,
     *,
     config_path: Path = PREPARATION_CONFIG_PATH,
 ) -> CohortResult:
     """Filter discharge codes, then keep the smallest numeric encounter ID per patient."""
-    validate_schema(columns, expected=ENCOUNTER_COLUMNS)
-    validate_unique_ids((row["encounter_id"] for row in rows), name="encounter_id")
-    validate_target((row[TARGET_COLUMN] for row in rows), allowed=TARGET_LABELS)
+    validate_schema(list(frame.columns), expected=ENCOUNTER_COLUMNS)
+    validate_unique_ids(frame["encounter_id"], name="encounter_id")
+    validate_target(frame[TARGET_COLUMN], allowed=TARGET_LABELS)
     descriptions = parse_ids_mapping(mapping, sections=(DISCHARGE_COLUMN,))[DISCHARGE_COLUMN]
     excluded_codes = read_json(config_path)["cohort"]["excluded_discharge_codes"]
     if not isinstance(excluded_codes, list) or any(
         not isinstance(code, str) or code not in descriptions for code in excluded_codes
     ):
         raise ValueError(f"{config_path}: excluded discharge codes must be mapped source strings.")
-    excluded = dict.fromkeys(sorted(set(excluded_codes), key=int), 0)
+    for column in ID_COLUMNS:
+        values = frame[column]
+        invalid = ~values.str.fullmatch(r"[0-9]+", na=False)
+        if invalid.any():
+            raise ValueError(f"Invalid {column}: {values.loc[invalid].iloc[0]!r}.")
 
-    eligible = []
-    selected_by_patient = {}
-    for row in rows:
-        encounter = row["encounter_id"]
-        rank = (_numeric_id(encounter, "encounter_id"), encounter)
-        patient = row["patient_nbr"]
-        _numeric_id(patient, "patient_nbr")
-        code = row[DISCHARGE_COLUMN]
-        if code not in descriptions:
-            raise ValueError(f"Unmapped discharge disposition code {code!r} for encounter {encounter!r}.")
-        if code in excluded:
-            excluded[code] += 1
-            continue
-        eligible.append(row)
-        previous = selected_by_patient.get(patient)
-        if previous is None or rank < previous[0]:
-            selected_by_patient[patient] = (rank, row)
+    discharge = frame[DISCHARGE_COLUMN]
+    unmapped = ~discharge.isin(descriptions)
+    if unmapped.any():
+        code = discharge.loc[unmapped].iloc[0]
+        encounter = frame.loc[unmapped, "encounter_id"].iloc[0]
+        raise ValueError(f"Unmapped discharge disposition code {code!r} for encounter {encounter!r}.")
 
-    selected = [row for _, row in sorted(selected_by_patient.values(), key=lambda entry: entry[0])]
-    validate_unique_ids((row["patient_nbr"] for row in selected), name="cohort patient_nbr")
-    unclear = Counter(
-        row[DISCHARGE_COLUMN] for row in selected
-        if descriptions[row[DISCHARGE_COLUMN]] in UNCLEAR_DISCHARGE_DESCRIPTIONS
+    is_excluded = discharge.isin(excluded_codes)
+    excluded_counts = discharge.loc[is_excluded].value_counts()
+    excluded = {code: int(excluded_counts.get(code, 0)) for code in sorted(set(excluded_codes), key=int)}
+    eligible = frame.loc[~is_excluded]
+    selected = (
+        eligible.assign(encounter_number=eligible["encounter_id"].map(int))
+        .sort_values(["encounter_number", "encounter_id"])
+        .drop_duplicates(subset="patient_nbr")
+        .drop(columns="encounter_number")
+        .reset_index(drop=True)
     )
+    validate_unique_ids(selected["patient_nbr"], name="cohort patient_nbr")
+    selected_codes = selected[DISCHARGE_COLUMN]
+    unclear = selected_codes.loc[
+        selected_codes.map(descriptions).isin(UNCLEAR_DISCHARGE_DESCRIPTIONS)
+    ].value_counts()
     flow = [
-        _stage_summary("Cleaned", rows, 0),
+        _stage_summary("Cleaned", frame, 0),
         _stage_summary("Eligible", eligible, sum(excluded.values())),
         _stage_summary("Cohort", selected, len(eligible) - len(selected)),
     ]
-    stages = {"cleaned": rows, "eligible": eligible, "cohort": selected}
+    stages = {"cleaned": frame, "eligible": eligible, "cohort": selected}
     return CohortResult(
-        columns=tuple(columns), rows=selected, flow=flow, excluded_by_code=excluded,
-        unclear_retained_by_code=dict(sorted(unclear.items(), key=lambda entry: int(entry[0]))),
-        audit=_column_audit(columns, stages),
+        frame=selected, flow=flow, excluded_by_code=excluded,
+        unclear_retained_by_code={code: int(unclear[code]) for code in sorted(unclear.index, key=int)},
+        audit=_column_audit(ENCOUNTER_COLUMNS, stages),
     )
 
 
@@ -140,8 +133,8 @@ def save_cohort_result(
     audit_path: Path = COHORT_AUDIT_PATH,
 ) -> tuple[Path, Path]:
     """Write the ordered cohort and its aggregate CSV audit."""
-    write_csv(cohort_path, result.columns, result.rows)
-    write_csv(audit_path, AUDIT_COLUMNS, result.audit)
+    write_csv_frame(cohort_path, result.frame)
+    write_csv_frame(audit_path, result.audit)
     return cohort_path, audit_path
 
 
@@ -173,9 +166,8 @@ SUPPLEMENTARY_ICD9 = re.compile(r"[VE][0-9]{1,4}(?:\.[0-9]{1,2})?")
 class DiagnosisGroupingResult:
     """Records with grouped diagnoses and counts for each diagnosis position."""
 
-    columns: tuple[str, ...]
-    rows: list[dict[str, str]]
-    group_counts: dict[str, dict[str, int]]
+    frame: pd.DataFrame
+    group_counts: pd.DataFrame
 
 
 def group_icd9(value: str) -> str:
@@ -196,29 +188,24 @@ def group_icd9(value: str) -> str:
     return "Other_numeric"
 
 
-def group_diagnoses(
-    columns: Sequence[str], rows: list[dict[str, str]],
-) -> DiagnosisGroupingResult:
-    """Replace the three source diagnosis columns in place within each row's schema."""
-    validate_schema(columns, expected=ENCOUNTER_COLUMNS)
-    output_columns = GROUPED_ENCOUNTER_COLUMNS
-    counts = {column: Counter() for column in DIAGNOSIS_GROUP_COLUMNS}
-    grouped_rows = []
-    for source in rows:
-        row = dict(zip(output_columns, (source[column] for column in columns), strict=True))
-        for column, group_counts in counts.items():
-            group = row[column] = group_icd9(row[column])
-            group_counts[group] += 1
-        grouped_rows.append(row)
+def _grouped_diagnosis_columns(frame: pd.DataFrame) -> dict[str, pd.Series]:
+    codes = set().union(*(frame[column].unique() for column in DIAGNOSIS_COLUMNS))
+    lookup = {code: group_icd9(code) for code in codes}
+    return {
+        group_column: frame[source].map(lookup).astype("string")
+        for source, group_column in zip(DIAGNOSIS_COLUMNS, DIAGNOSIS_GROUP_COLUMNS, strict=True)
+    }
 
-    return DiagnosisGroupingResult(
-        columns=output_columns,
-        rows=grouped_rows,
-        group_counts={
-            column: {group: column_counts[group] for group in DIAGNOSIS_GROUPS}
-            for column, column_counts in counts.items()
-        },
-    )
+
+def group_diagnoses(frame: pd.DataFrame) -> DiagnosisGroupingResult:
+    """Replace the three source diagnosis fields with their fixed ICD-9 groups."""
+    validate_schema(list(frame.columns), expected=ENCOUNTER_COLUMNS)
+    grouped = frame.assign(**_grouped_diagnosis_columns(frame)).loc[:, list(GROUPED_ENCOUNTER_COLUMNS)]
+    counts = {
+        column: grouped[column].value_counts().reindex(DIAGNOSIS_GROUPS, fill_value=0)
+        for column in DIAGNOSIS_GROUP_COLUMNS
+    }
+    return DiagnosisGroupingResult(frame=grouped, group_counts=pd.DataFrame(counts).rename_axis("Diagnosis group"))
 
 
 FEATURE_AUDIT_PATH = PREPARATION_OUTPUT_DIR / "feature_audit.csv"
@@ -233,16 +220,16 @@ FEATURE_AUDIT_COLUMNS = (
 class FeatureSelectionResult:
     """The ordered prepared schema, its records, and feature selection audit."""
 
-    columns: tuple[str, ...]
-    rows: list[dict[str, str]]
-    audit: list[dict[str, CsvValue]]
+    frame: pd.DataFrame
+    audit: pd.DataFrame
 
 
 def select_predictors(
     grouped: DiagnosisGroupingResult, *, config_path: Path = PREPARATION_CONFIG_PATH,
 ) -> FeatureSelectionResult:
     """Project the grouped encounters onto the configured baseline schema."""
-    validate_schema(grouped.columns, expected=GROUPED_ENCOUNTER_COLUMNS)
+    grouped_columns = list(grouped.frame.columns)
+    validate_schema(grouped_columns, expected=GROUPED_ENCOUNTER_COLUMNS)
     policy = read_json(config_path)["feature_selection"]
     predictors = policy["predictors"]
     drops = policy["dropped_source_columns"]
@@ -257,16 +244,16 @@ def select_predictors(
     if not isinstance(drops, dict) or not isinstance(not_created, dict):
         raise ValueError("Expected name-to-reason mappings for dropped and uncreated columns.")
     selected_columns = set(columns)
-    if drops.keys() & selected_columns or selected_columns | drops.keys() != set(grouped.columns):
+    if drops.keys() & selected_columns or selected_columns | drops.keys() != set(grouped_columns):
         raise ValueError("Output and dropped columns must account for the grouped schema without overlap.")
-    if set(not_created) & (set(ENCOUNTER_COLUMNS) | set(grouped.columns)):
+    if set(not_created) & (set(ENCOUNTER_COLUMNS) | set(grouped_columns)):
         raise ValueError("A column declared as not created is present in the source or grouped schema.")
     if any(not isinstance(reason, str) or not reason.strip() for reason in (*drops.values(), *not_created.values())):
         raise ValueError("Each dropped or not created column needs a reason.")
 
-    rows = [{column: row[column] for column in columns} for row in grouped.rows]
+    prepared = grouped.frame.loc[:, list(columns)]
     audit = _feature_audit(grouped, columns, drops, not_created)
-    return FeatureSelectionResult(columns=columns, rows=rows, audit=audit)
+    return FeatureSelectionResult(frame=prepared, audit=audit)
 
 
 def _feature_audit(
@@ -274,10 +261,10 @@ def _feature_audit(
     columns: tuple[str, ...],
     drops: dict[str, str],
     not_created: dict[str, str],
-) -> list[dict[str, CsvValue]]:
-    row_count = len(grouped.rows)
+) -> pd.DataFrame:
+    row_count = len(grouped.frame)
     positions = {column: index for index, column in enumerate(columns, start=1)}
-    empty = Counter(column for row in grouped.rows for column, value in row.items() if value == "")
+    empty = grouped.frame.eq("").sum()
     audit: list[dict[str, CsvValue]] = []
 
     def add(
@@ -304,7 +291,7 @@ def _feature_audit(
             "missing_rate_after": before_rate if present else None,
         })
 
-    for column in grouped.columns:
+    for column in grouped.frame.columns:
         if column in ID_COLUMNS:
             action, logical_type, reason = "retain_identifier", "identifier", "Integrity checks and split tracking."
         elif column == TARGET_COLUMN:
@@ -315,24 +302,25 @@ def _feature_audit(
             action = "retain_predictor"
             logical_type = "numeric" if column in COUNT_COLUMNS else "nominal"
             reason = "Included in the approved baseline."
-        add(column, action, logical_type, reason, empty_before=empty[column])
+        add(column, action, logical_type, reason, empty_before=int(empty[column]))
 
     for source, replacement in zip(DIAGNOSIS_COLUMNS, DIAGNOSIS_GROUP_COLUMNS, strict=True):
         add(
             source, "replaced_diagnosis", "nominal", "Replaced by the fixed ICD-9 grouping.",
-            input_stage="cohort", empty_before=grouped.group_counts[replacement]["Missing"],
+            input_stage="cohort", empty_before=int(grouped.group_counts.at["Missing", replacement]),
             replacement=replacement,
         )
     for column, reason in not_created.items():
         add(column, "not_created", "", reason, input_stage="")
-    return audit
+    integer_columns = ("output_position", "rows_before", "rows_after", "empty_before", "empty_after")
+    return pd.DataFrame(audit, columns=FEATURE_AUDIT_COLUMNS).astype(dict.fromkeys(integer_columns, "Int64"))
 
 
 def save_feature_audit(
     result: FeatureSelectionResult, *, audit_path: Path = FEATURE_AUDIT_PATH,
 ) -> Path:
     """Write the column decisions, positions, and missingness for this selection."""
-    return write_csv(audit_path, FEATURE_AUDIT_COLUMNS, result.audit)
+    return write_csv_frame(audit_path, result.audit)
 
 
 FULL_PREPARED_PATH = PROCESSED_DIR / "full_prepared.csv"
@@ -361,42 +349,32 @@ def validate_full_prepared(
     """Verify schema, identifiers, and values against the ordered cohort."""
     predictors = read_json(config_path)["feature_selection"]["predictors"]
     expected_columns = (*ID_COLUMNS, *predictors, TARGET_COLUMN)
-    validate_schema(selected.columns, expected=expected_columns)
-    if len(selected.columns) != 35:
+    prepared = selected.frame.reset_index(drop=True)
+    source = cohort.frame.reset_index(drop=True)
+    validate_schema(list(prepared.columns), expected=expected_columns)
+    if len(prepared.columns) != 35:
         raise ValueError("The prepared schema must contain exactly 35 columns.")
-    if not selected.rows or len(selected.rows) != len(cohort.rows):
+    if prepared.empty or len(prepared) != len(source):
         raise ValueError("The prepared table must contain one row for every cohort encounter.")
     for column in ID_COLUMNS:
-        validate_unique_ids((row[column] for row in selected.rows), name=f"prepared {column}")
-    validate_target((row[TARGET_COLUMN] for row in selected.rows), allowed=TARGET_LABELS)
-    diagnosis_sources = dict(zip(DIAGNOSIS_GROUP_COLUMNS, DIAGNOSIS_COLUMNS, strict=True))
+        validate_unique_ids(prepared[column], name=f"prepared {column}")
+    validate_target(prepared[TARGET_COLUMN], allowed=TARGET_LABELS)
+    diagnosis_groups = _grouped_diagnosis_columns(source)
+    for column, values in prepared.items():
+        expected = diagnosis_groups[column] if column in diagnosis_groups else source[column]
+        differs = ~values.eq(expected).fillna(False)
+        if differs.any():
+            row_number = int(differs.to_numpy().argmax()) + 1
+            raise ValueError(f"Prepared value differs from the cohort at row {row_number}, column {column!r}.")
 
-    empty_counts: Counter[str] = Counter()
-    label_counts: Counter[str] = Counter()
-    rows_with_empty = 0
-    for row_number, (source, prepared) in enumerate(zip(cohort.rows, selected.rows, strict=True), start=1):
-        if tuple(prepared) != selected.columns:
-            raise ValueError(f"Unexpected prepared record schema at row {row_number}.")
-        has_empty = False
-        for column, value in prepared.items():
-            if column in diagnosis_sources:
-                expected = group_icd9(source[diagnosis_sources[column]])
-            else:
-                expected = source[column]
-            if value != expected:
-                raise ValueError(f"Prepared value differs from the cohort at row {row_number}, column {column!r}.")
-            if value == "":
-                empty_counts[column] += 1
-                has_empty = True
-        rows_with_empty += has_empty
-        label_counts[prepared[TARGET_COLUMN]] += 1
-
+    empty = prepared.eq("")
+    label_counts = prepared[TARGET_COLUMN].value_counts()
     return {
-        "rows": len(selected.rows),
-        "columns": len(selected.columns),
-        "target_counts": {label: label_counts[label] for label in TARGET_LABELS},
-        "empty_cells_by_column": {column: empty_counts[column] for column in selected.columns},
-        "rows_with_empty_fields": rows_with_empty,
+        "rows": len(prepared),
+        "columns": len(prepared.columns),
+        "target_counts": {label: int(label_counts.get(label, 0)) for label in TARGET_LABELS},
+        "empty_cells_by_column": {column: int(count) for column, count in empty.sum().items()},
+        "rows_with_empty_fields": int(empty.any(axis=1).sum()),
     }
 
 
@@ -422,27 +400,19 @@ def save_full_prepared(
     artifact_keys = [path.relative_to(PROJECT_ROOT).as_posix() for path in artifact_paths]
     artifact_hashes = {key: sha256_file(project_root / key) for key in artifact_keys}
     full_key = FULL_PREPARED_PATH.relative_to(PROJECT_ROOT).as_posix()
-    csv_path = write_csv(project_root / full_key, selected.columns, selected.rows)
-    _, reloaded = read_csv(csv_path, expected_columns=selected.columns)
-    if reloaded != selected.rows:
+    csv_path = write_csv_frame(project_root / full_key, selected.frame)
+    reloaded = read_csv_frame(csv_path, expected_columns=list(selected.frame.columns))
+    if not reloaded.equals(selected.frame.reset_index(drop=True)):
         raise ValueError(f"CSV round trip changed prepared records: {csv_path}")
     artifact_hashes[full_key] = sha256_file(csv_path)
     if any(sha256_file(project_root / key) != checksum for key, checksum in raw_hashes.items()):
         raise RuntimeError("A raw source changed during full prepared export.")
 
-    schema = [
-        {
-            "name": row["column"],
-            "role": role,
-            "logical_type": row["logical_type"],
-        }
-        for row, role in _prepared_schema_rows(selected)
-    ]
     manifest = {
         "dataset": "full_prepared",
         "manifest_version": 1,
         "dataset_path": full_key,
-        "schema": schema,
+        "schema": _prepared_schema_rows(selected),
         "statistics": statistics,
         "cohort": {
             "flow": cohort.flow,
@@ -472,8 +442,12 @@ def save_full_prepared(
     return csv_path, manifest_path, manifest
 
 
-def _prepared_schema_rows(selected: FeatureSelectionResult):
+def _prepared_schema_rows(selected: FeatureSelectionResult) -> list[dict[str, str]]:
     """Return feature audit entries in prepared column order with their schema roles."""
-    audit = {row["column"]: row for row in selected.audit if row["output_position"] is not None}
+    audit = selected.audit.loc[selected.audit["output_position"].notna()].set_index("column")
+    ordered = audit.loc[list(selected.frame.columns), ["action", "logical_type"]]
     roles = {"retain_identifier": "identifier", "retain_predictor": "predictor", "retain_target": "target"}
-    return [(audit[column], roles[audit[column]["action"]]) for column in selected.columns]
+    return [
+        {"name": column, "role": roles[action], "logical_type": logical_type}
+        for column, action, logical_type in ordered.itertuples(name=None)
+    ]

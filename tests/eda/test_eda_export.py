@@ -22,8 +22,8 @@ class AdmissionLookupTests(TestCase):
         entries = (
             ("6", "NULL"), ("", ""), ("admission_source_id", "description"), ("7", "Emergency Room"),
         )
-        rows = [dict(zip(MAPPING_COLUMNS, entry, strict=True)) for entry in entries]
-        table = RawTable(Path("mapping.csv"), "", 0, list(MAPPING_COLUMNS), rows)
+        mapping = pd.DataFrame(entries, columns=MAPPING_COLUMNS, dtype="string")
+        table = RawTable(Path("mapping.csv"), "", 0, mapping)
         cohort = pd.DataFrame({"admission_type_id": ["6", "99"], "admission_source_id": ["7", ""]})
         with patch("src.eda.data.load_ids_mapping", return_value=table):
             lookup = _admission_descriptions(cohort, table.path).set_index(["column", "code"])

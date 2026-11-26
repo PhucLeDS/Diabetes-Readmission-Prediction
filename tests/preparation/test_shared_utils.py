@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 from src import io_utils, paths, validation
 
 
@@ -57,11 +59,16 @@ class FileTests(unittest.TestCase):
             {"encounter": "0001", "result": "None", "comment": "a\rb", "count": "2"},
             {"encounter": "0002", "result": "?", "comment": "a,b\nc", "count": ""},
         ])
+        frame = io_utils.read_csv_frame(target, expected_columns=columns)
+        pd.testing.assert_frame_equal(frame, pd.DataFrame(values, columns=columns, dtype="string"))
+        self.assertEqual(io_utils.write_csv_frame(target, frame.set_axis([7, 8])), target)
 
     def test_csv_reads_byte_order_mark_and_windows_newlines(self):
         target = self.directory / "input.csv"
         target.write_bytes(codecs.BOM_UTF8 + b"id,value\r\n001,None\r\n")
         self.assertEqual(io_utils.read_csv(target), (["id", "value"], [{"id": "001", "value": "None"}]))
+        frame = io_utils.read_csv_frame(target)
+        self.assertEqual(frame.iloc[0].to_dict(), {"id": "001", "value": "None"})
 
     def test_csv_rejects_invalid_headers_and_row_widths(self):
         target = self.directory / "invalid.csv"
@@ -75,8 +82,9 @@ class FileTests(unittest.TestCase):
         ):
             with self.subTest(content=content):
                 target.write_bytes(content)
-                with self.assertRaisesRegex(ValueError, error):
-                    io_utils.read_csv(target, expected_columns=["id", "value"])
+                for reader in (io_utils.read_csv_frame, io_utils.read_csv):
+                    with self.assertRaisesRegex(ValueError, error):
+                        reader(target, expected_columns=["id", "value"])
 
     def test_failed_csv_write_keeps_previous_output(self):
         target = self.directory / "output.csv"

@@ -1,11 +1,12 @@
 """Load and inspect the unmodified UCI source tables."""
 
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.io_utils import read_csv, sha256_file
+import pandas as pd
+
+from src.io_utils import read_csv_frame, sha256_file
 from src.paths import IDS_MAPPING_PATH, RAW_DATA_PATH
 from src.validation import validate_target, validate_unique_ids
 
@@ -43,13 +44,12 @@ MAPPING_SHA256 = "f1bb82b471cb34649352597572c9b1fb00bd27f77b9f5a22a03dc3eb103974
 
 @dataclass(frozen=True)
 class RawTable:
-    """Source file metadata and CSV records in their original order."""
+    """Source file metadata and text data in its original order."""
 
     path: Path
     sha256: str
     size_bytes: int
-    columns: list[str]
-    rows: list[dict[str, str]]
+    frame: pd.DataFrame
 
 
 def _load_verified_csv(
@@ -59,15 +59,15 @@ def _load_verified_csv(
     checksum = sha256_file(path)
     if checksum != expected_sha256:
         raise ValueError(f"{path}: SHA-256 mismatch. Expected {expected_sha256}, got {checksum}.")
-    columns, rows = read_csv(path, expected_columns=expected_columns)
+    frame = read_csv_frame(path, expected_columns=expected_columns)
     after = path.stat()
     if (before.st_ino, before.st_size, before.st_mtime_ns) != (
         after.st_ino, after.st_size, after.st_mtime_ns,
     ):
         raise RuntimeError(f"{path}: source changed while being read.")
-    if len(rows) != expected_rows:
-        raise ValueError(f"{path}: expected {expected_rows} data rows, got {len(rows)}.")
-    return RawTable(path=path, sha256=checksum, size_bytes=after.st_size, columns=columns, rows=rows)
+    if len(frame) != expected_rows:
+        raise ValueError(f"{path}: expected {expected_rows} data rows, got {len(frame)}.")
+    return RawTable(path=path, sha256=checksum, size_bytes=after.st_size, frame=frame)
 
 
 def load_raw_encounters(path: Path = RAW_DATA_PATH) -> RawTable:
@@ -76,16 +76,17 @@ def load_raw_encounters(path: Path = RAW_DATA_PATH) -> RawTable:
         path, expected_columns=ENCOUNTER_COLUMNS, expected_rows=ENCOUNTER_ROWS,
         expected_sha256=ENCOUNTER_SHA256,
     )
-    for row_number, row in enumerate(table.rows, start=1):
-        for column in (*ID_COLUMNS, *COUNT_COLUMNS):
-            value = row[column]
-            if not (value.isascii() and value.isdecimal()):
-                raise ValueError(
-                    f"{path}: expected nonnegative integer text in data row "
-                    f"{row_number}, column {column!r}, got {value!r}."
-                )
-    validate_unique_ids((row["encounter_id"] for row in table.rows), name="encounter_id")
-    validate_target((row[TARGET_COLUMN] for row in table.rows), allowed=TARGET_LABELS)
+    for column in (*ID_COLUMNS, *COUNT_COLUMNS):
+        values = table.frame[column]
+        invalid = ~values.str.fullmatch(r"[0-9]+", na=False)
+        if invalid.any():
+            position = int(invalid.to_numpy().argmax())
+            raise ValueError(
+                f"{path}: expected nonnegative integer text in data row "
+                f"{position + 1}, column {column!r}, got {values.iloc[position]!r}."
+            )
+    validate_unique_ids(table.frame["encounter_id"], name="encounter_id")
+    validate_target(table.frame[TARGET_COLUMN], allowed=TARGET_LABELS)
     return table
 
 
@@ -102,8 +103,8 @@ def parse_ids_mapping(mapping: RawTable, *, sections: Sequence[str]) -> dict[str
     code_field, description_field = MAPPING_COLUMNS
     descriptions: dict[str, dict[str, str]] = {section: {} for section in sections}
     current_section = code_field
-    for row in mapping.rows:
-        code, description = row[code_field], row[description_field].strip()
+    for code, description in mapping.frame.loc[:, list(MAPPING_COLUMNS)].itertuples(index=False, name=None):
+        description = description.strip()
         if code in MAPPING_SECTIONS and description == description_field:
             current_section = code
             continue
@@ -124,28 +125,28 @@ def parse_ids_mapping(mapping: RawTable, *, sections: Sequence[str]) -> dict[str
 
 def summarize_raw_encounters(table: RawTable) -> dict:
     """Count encounters, patients, and the three original labels."""
-    patient_counts = Counter(row["patient_nbr"] for row in table.rows)
-    target_counts = Counter(row[TARGET_COLUMN] for row in table.rows)
+    patient_counts = table.frame["patient_nbr"].value_counts()
+    target_counts = table.frame[TARGET_COLUMN].value_counts()
     return {
-        "encounters": len(table.rows),
-        "columns": len(table.columns),
+        "encounters": len(table.frame),
+        "columns": len(table.frame.columns),
         "patients": len(patient_counts),
-        "patients_with_multiple_encounters": sum(count > 1 for count in patient_counts.values()),
-        "target_counts": {label: target_counts[label] for label in TARGET_LABELS},
+        "patients_with_multiple_encounters": int(patient_counts.gt(1).sum()),
+        "target_counts": {label: int(target_counts.get(label, 0)) for label in TARGET_LABELS},
     }
 
 
-def profile_raw_columns(table: RawTable) -> list[dict[str, str | int]]:
+def profile_raw_columns(table: RawTable) -> pd.DataFrame:
     """Show logical column roles and counts of raw markers without normalizing them."""
     logical_types = dict.fromkeys(ID_COLUMNS, "identifier")
     logical_types.update(dict.fromkeys(COUNT_COLUMNS, "integer"))
     logical_types[TARGET_COLUMN] = "target"
     profile = []
-    for column in table.columns:
-        markers = Counter(row[column] for row in table.rows if row[column] in RAW_MARKERS)
+    for column, values in table.frame.items():
+        markers = values.value_counts()
         profile.append({
             "column": column,
             "logical_type": logical_types.get(column, "categorical"),
-            **{marker: markers[marker] for marker in RAW_MARKERS},
+            **{marker: int(markers.get(marker, 0)) for marker in RAW_MARKERS},
         })
-    return profile
+    return pd.DataFrame(profile)

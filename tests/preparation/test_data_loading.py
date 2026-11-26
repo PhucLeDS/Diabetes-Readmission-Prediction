@@ -6,6 +6,8 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 from src.io_utils import write_csv
 from src.preparation import data_loading
 
@@ -40,7 +42,7 @@ class RawLoadingTests(unittest.TestCase):
     def test_load_preserves_raw_values_and_repeated_patient_ids(self):
         rows = [self.make_encounter(), self.make_encounter("002", label="<30")]
         table = self.load_fixture(rows)
-        self.assertEqual(table.rows, rows)
+        pd.testing.assert_frame_equal(table.frame, pd.DataFrame(rows, dtype="string"))
         self.assertEqual(data_loading.summarize_raw_encounters(table), {
             "encounters": 2,
             "columns": 50,
@@ -48,11 +50,11 @@ class RawLoadingTests(unittest.TestCase):
             "patients_with_multiple_encounters": 1,
             "target_counts": {"NO": 1, "<30": 1, ">30": 0},
         })
-        profile = {row["column"]: row for row in data_loading.profile_raw_columns(table)}
-        self.assertEqual(profile["A1Cresult"]["None"], 2)
-        self.assertEqual(profile["race"]["?"], 2)
-        self.assertEqual(profile["gender"]["Unknown/Invalid"], 2)
-        self.assertEqual(profile["weight"][""], 2)
+        profile = data_loading.profile_raw_columns(table).set_index("column")
+        self.assertEqual(profile.at["A1Cresult", "None"], 2)
+        self.assertEqual(profile.at["race", "?"], 2)
+        self.assertEqual(profile.at["gender", "Unknown/Invalid"], 2)
+        self.assertEqual(profile.at["weight", ""], 2)
 
     def test_checksum_mismatch_is_rejected_for_both_files(self):
         path = self.directory / "altered.csv"
@@ -98,9 +100,9 @@ class RawLoadingTests(unittest.TestCase):
             patch.object(data_loading, "MAPPING_ROWS", 10),
         ):
             table = data_loading.load_ids_mapping(path)
-        self.assertEqual(table.rows[2], {"admission_type_id": "", "description": ""})
-        self.assertEqual(table.rows[7]["admission_type_id"], "admission_source_id")
-        self.assertEqual(table.rows[9]["description"], " Emergency, room ")
+        self.assertEqual(table.frame.iloc[2].to_dict(), {"admission_type_id": "", "description": ""})
+        self.assertEqual(table.frame.at[7, "admission_type_id"], "admission_source_id")
+        self.assertEqual(table.frame.at[9, "description"], " Emergency, room ")
         self.assertEqual(data_loading.parse_ids_mapping(table, sections=data_loading.MAPPING_SECTIONS), {
             "admission_type_id": {"1": "Emergency", "2": "Not Available"},
             "discharge_disposition_id": {"1": "NULL", "2": "Not Mapped"},
@@ -119,9 +121,8 @@ class RawLoadingTests(unittest.TestCase):
         )
         for entries, error in cases:
             with self.subTest(entries=entries):
-                lookup_rows = [dict(zip(columns, entry, strict=True)) for entry in entries]
-                records = [{"admission_type_id": "3", "description": ""}, *lookup_rows]
-                table = data_loading.RawTable(Path("mapping.csv"), "", 0, list(columns), records)
+                frame = pd.DataFrame([("3", ""), *entries], columns=columns, dtype="string")
+                table = data_loading.RawTable(Path("mapping.csv"), "", 0, frame)
                 with self.assertRaisesRegex(ValueError, f"{error} for discharge_disposition_id"):
                     data_loading.parse_ids_mapping(table, sections=("discharge_disposition_id",))
 

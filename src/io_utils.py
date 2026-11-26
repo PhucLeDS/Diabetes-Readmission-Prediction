@@ -11,6 +11,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, TextIO
 
+import pandas as pd
+
 from src.validation import validate_schema
 
 
@@ -49,10 +51,9 @@ def input_checksums(
     return checksums
 
 
-def read_csv(
-    path: Path, *, expected_columns: Sequence[str] | None = None,
-) -> tuple[list[str], list[dict[str, str]]]:
-    """Read a UTF-8 CSV table as text, preserving empty fields and literal tokens."""
+def _read_csv_rows(
+    path: Path, *, expected_columns: Sequence[str] | None,
+) -> tuple[list[str], list[list[str]]]:
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.reader(stream, strict=True)
         columns = next(reader, [])
@@ -61,18 +62,22 @@ def read_csv(
         for row_number, values in enumerate(reader, start=1):
             if len(values) != len(columns):
                 raise ValueError(f"{path}: unexpected field count in data row {row_number}.")
-            rows.append(dict(zip(columns, values, strict=True)))
+            rows.append(values)
     return columns, rows
 
 
-class _LfCsvStream:
-    """Keep CSV quoting for CR and LF while writing LF record separators."""
+def read_csv_frame(path: Path, *, expected_columns: Sequence[str] | None = None) -> pd.DataFrame:
+    """Read a CSV with strict row widths and preserve all field values as text."""
+    columns, rows = _read_csv_rows(path, expected_columns=expected_columns)
+    return pd.DataFrame(rows, columns=columns, dtype="string")
 
-    def __init__(self, stream: TextIO) -> None:
-        self.stream = stream
 
-    def write(self, record: str) -> int:
-        return self.stream.write(record.removesuffix("\r\n") + "\n")
+def read_csv(
+    path: Path, *, expected_columns: Sequence[str] | None = None,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Read text records for callers that still use the record-based interface."""
+    columns, rows = _read_csv_rows(path, expected_columns=expected_columns)
+    return columns, [dict(zip(columns, values, strict=True)) for values in rows]
 
 
 @contextmanager
@@ -110,6 +115,14 @@ def _output_stream(path: Path, *, overwrite: bool) -> Iterator[TextIO]:
             yield stream
 
 
+def write_csv_frame(path: Path, frame: pd.DataFrame, *, overwrite: bool = False) -> Path:
+    """Write ordered columns in UTF-8 with LF separators and no index."""
+    validate_schema(list(frame.columns))
+    with _output_stream(path, overwrite=overwrite) as stream:
+        frame.to_csv(stream, index=False, lineterminator="\n")
+    return path
+
+
 def write_csv(
     path: Path,
     columns: Sequence[str],
@@ -117,18 +130,16 @@ def write_csv(
     *,
     overwrite: bool = False,
 ) -> Path:
-    """Write an ordered UTF-8 CSV table, using empty fields for Python None."""
+    """Write records for callers that still use the record-based interface."""
     header = tuple(columns)
     validate_schema(header)
     expected_keys = set(header)
-    with _output_stream(path, overwrite=overwrite) as stream:
-        writer = csv.writer(_LfCsvStream(stream))
-        writer.writerow(header)
-        for row_number, row in enumerate(rows, start=1):
-            if row.keys() != expected_keys:
-                raise ValueError(f"{path}: columns differ from the schema in data row {row_number}.")
-            writer.writerow(row[column] for column in header)
-    return path
+    values = []
+    for row_number, row in enumerate(rows, start=1):
+        if row.keys() != expected_keys:
+            raise ValueError(f"{path}: columns differ from the schema in data row {row_number}.")
+        values.append(["" if row[column] is None else str(row[column]) for column in header])
+    return write_csv_frame(path, pd.DataFrame(values, columns=header, dtype="string"), overwrite=overwrite)
 
 
 def read_json(path: Path) -> Any:

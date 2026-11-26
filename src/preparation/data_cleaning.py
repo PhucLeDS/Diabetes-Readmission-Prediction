@@ -1,10 +1,11 @@
 """Normalize the approved raw markers and audit all encounter columns."""
 
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.io_utils import CsvValue, read_json, write_csv
+import pandas as pd
+
+from src.io_utils import read_json, write_csv_frame
 from src.paths import CONFIG_DIR, INTERIM_DIR, PREPARATION_OUTPUT_DIR
 from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, ID_COLUMNS, TARGET_COLUMN, RawTable
 from src.validation import validate_schema
@@ -25,9 +26,8 @@ AUDIT_COLUMNS = (
 class CleaningResult:
     """Cleaned records in source order and an audit row for each source column."""
 
-    columns: tuple[str, ...]
-    rows: list[dict[str, str]]
-    audit: list[dict[str, CsvValue]]
+    frame: pd.DataFrame
+    audit: pd.DataFrame
 
 
 def _read_cleaning_rules(path: Path) -> tuple[dict[str, str], dict[str, str]]:
@@ -51,47 +51,46 @@ def clean_encounters(
     table: RawTable, *, config_path: Path = CLEANING_CONFIG_PATH,
 ) -> CleaningResult:
     """Apply the configured replacements to a verified encounter table."""
-    validate_schema(table.columns, expected=ENCOUNTER_COLUMNS)
+    source = table.frame
+    validate_schema(list(source.columns), expected=ENCOUNTER_COLUMNS)
     markers, literals = _read_cleaning_rules(config_path)
-    empty_before: Counter[str] = Counter()
-    changed: Counter[str] = Counter()
-    preserved: Counter[str] = Counter()
-    rows = []
-    for row_number, source in enumerate(table.rows, start=1):
-        row = source.copy()
-        for column, value in source.items():
-            if value == "":
-                empty_before[column] += 1
-            elif markers.get(column) == value:
-                row[column] = ""
-                changed[column] += 1
-            elif value == "?":
+    cleaned = source.copy()
+    count = len(source)
+    audit = []
+    for column, values in source.items():
+        marker = markers.get(column, "")
+        literal = literals.get(column, "")
+        if marker != "?":
+            unapproved = values.eq("?")
+            if unapproved.any():
+                row_number = int(unapproved.fillna(False).to_numpy().argmax()) + 1
                 raise ValueError(f"Unapproved '?' marker in column {column!r}, data row {row_number}.")
-            if literals.get(column) == value:
-                preserved[column] += 1
-        rows.append(row)
+        changed = marker_after = 0
+        if marker:
+            matches = values.eq(marker)
+            changed = int(matches.sum())
+            cleaned[column] = values.mask(matches, "")
+            marker_after = int(cleaned[column].eq(marker).sum())
 
-    count = len(rows)
-    audit = [
-        {
+        empty_before = int(values.eq("").sum())
+        empty_after = int(cleaned[column].eq("").sum())
+        audit.append({
             "column": column,
-            "rows_before": len(table.rows),
-            "rows_after": count,
-            "source_marker": markers.get(column, ""),
-            "marker_before": changed[column],
-            "marker_after": 0,
-            "empty_before": empty_before[column],
-            "empty_after": empty_before[column] + changed[column],
-            "missing_rate_before": (empty_before[column] + changed[column]) / count if count else None,
-            "missing_rate_after": (empty_before[column] + changed[column]) / count if count else None,
-            "changed_cells": changed[column],
-            "preserved_literal": literals.get(column, ""),
-            "literal_before": preserved[column],
-            "literal_after": preserved[column],
-        }
-        for column in table.columns
-    ]
-    return CleaningResult(columns=tuple(table.columns), rows=rows, audit=audit)
+            "rows_before": count,
+            "rows_after": len(cleaned),
+            "source_marker": marker,
+            "marker_before": changed,
+            "marker_after": marker_after,
+            "empty_before": empty_before,
+            "empty_after": empty_after,
+            "missing_rate_before": (empty_before + changed) / count if count else None,
+            "missing_rate_after": empty_after / count if count else None,
+            "changed_cells": changed,
+            "preserved_literal": literal,
+            "literal_before": int(values.eq(literal).sum()) if literal else 0,
+            "literal_after": int(cleaned[column].eq(literal).sum()) if literal else 0,
+        })
+    return CleaningResult(frame=cleaned, audit=pd.DataFrame(audit, columns=AUDIT_COLUMNS))
 
 
 def save_cleaning_result(
@@ -101,6 +100,6 @@ def save_cleaning_result(
     audit_path: Path = CLEANING_AUDIT_PATH,
 ) -> tuple[Path, Path]:
     """Write the cleaned dataset and audit with the project's CSV conventions."""
-    write_csv(cleaned_path, result.columns, result.rows)
-    write_csv(audit_path, AUDIT_COLUMNS, result.audit)
+    write_csv_frame(cleaned_path, result.frame)
+    write_csv_frame(audit_path, result.audit)
     return cleaned_path, audit_path
