@@ -7,8 +7,8 @@ import pandas as pd
 
 from src.io_utils import read_csv, read_json, sha256_file
 from src.paths import IDS_MAPPING_PATH, PROJECT_ROOT
-from src.preparation.data_loading import COUNT_COLUMNS, ID_COLUMNS, TARGET_COLUMN, load_ids_mapping
-from src.preparation.dataset_export import load_full_prepared
+from src.preparation.data_loading import COUNT_COLUMNS, ID_COLUMNS, TARGET_COLUMN, load_ids_mapping, parse_ids_mapping
+from src.preparation.dataset_export import load_full_prepared, parse_count_columns
 from src.preparation.dataset_preparation import (
     FEATURE_AUDIT_PATH,
     PREPARATION_MANIFEST_PATH,
@@ -83,26 +83,9 @@ class EdaInputs:
 
 
 def _admission_descriptions(cohort: pd.DataFrame, mapping_path: Path) -> pd.DataFrame:
-    mapping = load_ids_mapping(mapping_path)
-    code_field, description_field = mapping.columns
-    descriptions: dict[str, dict[str, str]] = {column: {} for column in ADMISSION_COLUMNS}
-    section = code_field
-
-    for row in mapping.rows:
-        code, description = row[code_field].strip(), row[description_field].strip()
-        if description == "description":
-            section = code
-            continue
-        if not (code or description) or section not in descriptions:
-            continue
-        if not (code.isascii() and code.isdecimal() and description) or code in descriptions[section]:
-            raise ValueError(f"Invalid or duplicate lookup entry for {section}: {code!r}.")
-        descriptions[section][code] = description
-
+    descriptions = parse_ids_mapping(load_ids_mapping(mapping_path), sections=ADMISSION_COLUMNS)
     records = []
     for column, lookup in descriptions.items():
-        if not lookup:
-            raise ValueError(f"No mapping entries found for {column}.")
         observed_codes = set(cohort[column].unique()) - {""}
         for code in sorted(observed_codes | lookup.keys(), key=lambda value: (len(value), value)):
             description = lookup.get(code, "")
@@ -153,14 +136,8 @@ def _column_dictionary(schema: list[dict[str, str]]) -> pd.DataFrame:
 
 def load_eda_inputs(*, project_root: Path = PROJECT_ROOT) -> EdaInputs:
     """Load and describe the full cohort without writing any artifacts."""
-    columns, rows = load_full_prepared(project_root=project_root)
+    cohort = parse_count_columns(load_full_prepared(project_root=project_root))
     manifest = read_json(project_root / PREPARATION_MANIFEST_PATH.relative_to(PROJECT_ROOT))
-    cohort = pd.DataFrame.from_records(rows, columns=columns).astype("string")
-    for column in COUNT_COLUMNS:
-        values = cohort[column]
-        if not (values.eq("") | values.str.fullmatch(r"[0-9]+")).all():
-            raise ValueError(f"{column!r} must contain nonnegative integers or empty fields.")
-        cohort[column] = values.replace("", pd.NA).astype("Int64")
 
     cohort_flow = pd.DataFrame.from_records(manifest["cohort"]["flow"])
     cohort_flow["stage"] = cohort_flow["stage"].replace({"Cleaned": "Cleaned (same rows as raw)"})
@@ -174,8 +151,7 @@ def load_eda_inputs(*, project_root: Path = PROJECT_ROOT) -> EdaInputs:
     audit_path = project_root / audit_key
     if sha256_file(audit_path) != manifest["artifact_sha256"][audit_key]:
         raise ValueError("The feature audit differs from the preparation manifest.")
-    _, audit_rows = read_csv(audit_path)
-    audit = pd.DataFrame.from_records(audit_rows)
+    audit = read_csv(audit_path)
     decisions = audit.loc[
         audit["action"].isin(["drop_source", "replaced_diagnosis", "not_created"]),
         ["column", "action", "input_stage", "output_column", "reason"],

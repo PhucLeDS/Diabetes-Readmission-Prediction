@@ -8,6 +8,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
 
 from src import io_utils, paths, validation
 
@@ -45,22 +48,23 @@ class FileTests(unittest.TestCase):
             {"encounter": "0001", "result": "None", "comment": "a\rb", "count": 2},
             {"encounter": "0002", "result": "?", "comment": "a,b\nc", "count": None},
         ]
-        self.assertEqual(io_utils.write_csv(target, columns, iter(rows)), target)
+        self.assertEqual(io_utils.write_csv(target, pd.DataFrame(rows, columns=columns, dtype=object)), target)
         self.assertEqual(
             target.read_bytes(),
             b'encounter,result,comment,count\n0001,None,"a\rb",2\n0002,?,"a,b\nc",\n',
         )
-        header, values = io_utils.read_csv(target, expected_columns=columns)
-        self.assertEqual(header, columns)
-        self.assertEqual(values, [
+        frame = io_utils.read_csv(target, expected_columns=columns)
+        self.assertEqual(frame.to_dict(orient="records"), [
             {"encounter": "0001", "result": "None", "comment": "a\rb", "count": "2"},
             {"encounter": "0002", "result": "?", "comment": "a,b\nc", "count": ""},
         ])
+        self.assertEqual(io_utils.write_csv(target, frame.set_axis([7, 8])), target)
 
     def test_csv_reads_byte_order_mark_and_windows_newlines(self):
         target = self.directory / "input.csv"
         target.write_bytes(codecs.BOM_UTF8 + b"id,value\r\n001,None\r\n")
-        self.assertEqual(io_utils.read_csv(target), (["id", "value"], [{"id": "001", "value": "None"}]))
+        frame = io_utils.read_csv(target)
+        self.assertEqual(frame.iloc[0].to_dict(), {"id": "001", "value": "None"})
 
     def test_csv_rejects_invalid_headers_and_row_widths(self):
         target = self.directory / "invalid.csv"
@@ -79,9 +83,16 @@ class FileTests(unittest.TestCase):
 
     def test_failed_csv_write_keeps_previous_output(self):
         target = self.directory / "output.csv"
-        io_utils.write_csv(target, ["id"], [{"id": "001"}])
-        with self.assertRaisesRegex(ValueError, "data row 2"):
-            io_utils.write_csv(target, ["id"], [{"id": "002"}, {"wrong": "003"}], overwrite=True)
+        frame = pd.DataFrame({"id": ["001"]})
+        io_utils.write_csv(target, frame)
+
+        def fail_during_write(stream, **options):
+            stream.write("partial\n")
+            raise OSError("Simulated CSV write failure")
+
+        with patch.object(frame, "to_csv", side_effect=fail_during_write):
+            with self.assertRaisesRegex(OSError, "Simulated CSV write failure"):
+                io_utils.write_csv(target, frame, overwrite=True)
         self.assertEqual(target.read_bytes(), b"id\n001\n")
         self.assertEqual(list(self.directory.iterdir()), [target])
 
@@ -116,6 +127,50 @@ class FileTests(unittest.TestCase):
             io_utils.write_json(target, {"missing": float("nan")})
         self.assertFalse(target.exists())
         self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_artifact_conflict_is_checked_before_any_write(self):
+        existing = self.directory / "existing.png"
+        new = self.directory / "tables" / "new.csv"
+        existing.write_bytes(b"old image")
+        artifacts = {
+            new.relative_to(self.directory): b"value\n1\n",
+            existing.relative_to(self.directory): b"new image",
+        }
+        with self.assertRaisesRegex(FileExistsError, "existing.png"):
+            io_utils.write_artifacts(self.directory, artifacts)
+        self.assertEqual(existing.read_bytes(), b"old image")
+        self.assertFalse(new.parent.exists())
+
+        io_utils.write_artifacts(self.directory, artifacts, overwrite=True)
+        self.assertEqual(existing.read_bytes(), b"new image")
+        self.assertEqual(new.read_bytes(), b"value\n1\n")
+
+        with patch.object(io_utils, "write_bytes") as writer:
+            io_utils.write_artifacts(self.directory, artifacts)
+            io_utils.write_artifacts(self.directory, artifacts, overwrite=True)
+            writer.assert_not_called()
+
+    def test_artifact_retry_completes_partial_export(self):
+        data = self.directory / "table.csv"
+        manifest = self.directory / "manifest.json"
+        artifacts = {Path("table.csv"): b"value\n1\n", Path("manifest.json"): b"{}\n"}
+        write_bytes = io_utils.write_bytes
+
+        def fail_on_manifest(path, content, *, overwrite):
+            if path == manifest:
+                raise OSError("Simulated interruption")
+            return write_bytes(path, content, overwrite=overwrite)
+
+        with patch.object(io_utils, "write_bytes", side_effect=fail_on_manifest):
+            with self.assertRaisesRegex(OSError, "Simulated interruption"):
+                io_utils.write_artifacts(self.directory, artifacts)
+        self.assertEqual(data.read_bytes(), b"value\n1\n")
+        self.assertFalse(manifest.exists())
+
+        with patch.object(io_utils, "write_bytes", wraps=write_bytes) as writer:
+            io_utils.write_artifacts(self.directory, artifacts)
+            writer.assert_called_once_with(manifest, b"{}\n", overwrite=False)
+        self.assertEqual(manifest.read_bytes(), b"{}\n")
 
 
 class ValidationTests(unittest.TestCase):

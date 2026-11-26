@@ -115,7 +115,7 @@ python -m ipykernel install --sys-prefix --name diabetes-readmission \
   --display-name "Python (Diabetes Readmission)"
 ```
 
-The pinned packages provide the notebook environment and the libraries for EDA and Analysis. [Python requirements](requirements.txt)
+The pinned packages provide the notebook environment and pandas for data preparation, EDA, and Analysis. Preparation uses pandas for table processing and CSV export. EDA and Analysis also use the declared libraries for statistics and figures. [Python requirements](requirements.txt)
 
 ### Place the raw inputs
 
@@ -174,9 +174,9 @@ Run the suite from the repository root with the project environment active.
 python -m unittest discover -s tests -v
 ```
 
-The preparation suite passed 62 tests, including two isolated notebook runs that reproduce 19 generated files byte for byte under the verified environment. Three EDA tests check input and output checksums, consistency between tables, and output conflict handling. Two independent EDA exports reproduced 24 tables, 10 figures, and one manifest byte for byte in the verified environment. Integration checks report a skip when required inputs are absent. Weka loading is verified separately. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation) · [EDA validation](reports/02_eda.md#9-reproduction-and-validation)
+After the pandas refactor, all **85 tests** passed, comprising 67 Preparation tests, 3 EDA tests, and 15 Analysis tests. They cover source integrity, attribute order, partition membership, CSV and ARFF values, checksums, reconciliation across tables, and output protection. Integration tests require the corresponding input data. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation) · [EDA validation](reports/02_eda.md#9-reproduction-and-validation) · [Analysis validation](reports/03_analysis.md#8-reproduction-and-validation)
 
-At the Analysis handoff, all **81 repository checks** passed. Two independent exports reproduced all **16 Analysis files** byte for byte in the verified environment. The notebook ran in a fresh kernel and produced 12 tables matching the exported CSVs. The manifest records input and output checksums, configuration, and runtime versions. [Analysis validation](reports/03_analysis.md#8-reproduction-and-validation)
+Two independent runs executed all five notebooks in fresh kernels and exported the EDA and Analysis artifacts. Each run reproduced **19 Preparation files, 35 EDA files, and 16 Analysis files** byte for byte against the pre-refactor baseline and the other run. Both raw files retained their approved checksums. Weka **3.9.7** loaded all six ARFF files and verified compatible headers for each training stage. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation)
 
 ## Limitations
 

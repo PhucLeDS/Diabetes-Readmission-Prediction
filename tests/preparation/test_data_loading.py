@@ -6,6 +6,8 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 from src.io_utils import write_csv
 from src.preparation import data_loading
 
@@ -25,7 +27,7 @@ class RawLoadingTests(unittest.TestCase):
 
     def load_fixture(self, rows, *, columns=data_loading.ENCOUNTER_COLUMNS, expected_rows=None):
         path = self.directory / "diabetic_data.csv"
-        write_csv(path, columns, rows, overwrite=True)
+        write_csv(path, pd.DataFrame(rows, columns=columns, dtype="string"), overwrite=True)
         contents = path.read_bytes()
         checksum = sha256(contents).hexdigest()
         with (
@@ -40,7 +42,7 @@ class RawLoadingTests(unittest.TestCase):
     def test_load_preserves_raw_values_and_repeated_patient_ids(self):
         rows = [self.make_encounter(), self.make_encounter("002", label="<30")]
         table = self.load_fixture(rows)
-        self.assertEqual(table.rows, rows)
+        pd.testing.assert_frame_equal(table.frame, pd.DataFrame(rows, dtype="string"))
         self.assertEqual(data_loading.summarize_raw_encounters(table), {
             "encounters": 2,
             "columns": 50,
@@ -48,11 +50,11 @@ class RawLoadingTests(unittest.TestCase):
             "patients_with_multiple_encounters": 1,
             "target_counts": {"NO": 1, "<30": 1, ">30": 0},
         })
-        profile = {row["column"]: row for row in data_loading.profile_raw_columns(table)}
-        self.assertEqual(profile["A1Cresult"]["None"], 2)
-        self.assertEqual(profile["race"]["?"], 2)
-        self.assertEqual(profile["gender"]["Unknown/Invalid"], 2)
-        self.assertEqual(profile["weight"][""], 2)
+        profile = data_loading.profile_raw_columns(table).set_index("column")
+        self.assertEqual(profile.at["A1Cresult", "None"], 2)
+        self.assertEqual(profile.at["race", "?"], 2)
+        self.assertEqual(profile.at["gender", "Unknown/Invalid"], 2)
+        self.assertEqual(profile.at["weight", ""], 2)
 
     def test_checksum_mismatch_is_rejected_for_both_files(self):
         path = self.directory / "altered.csv"
@@ -87,17 +89,42 @@ class RawLoadingTests(unittest.TestCase):
 
     def test_mapping_is_loaded_as_original_text_rows(self):
         path = self.directory / "IDS_mapping.csv"
-        payload = b'admission_type_id,description\n1,Emergency\n,\nadmission_source_id,description\n7,"Emergency, room"\n'
+        payload = (
+            b"admission_type_id,description\n1,Emergency\n2,Not Available\n,\n"
+            b"discharge_disposition_id,description\n1,NULL\n2,Not Mapped\n,\n"
+            b'admission_source_id,description\n1,Unknown/Invalid\n7," Emergency, room "\n'
+        )
         path.write_bytes(payload)
         with (
             patch.object(data_loading, "MAPPING_SHA256", sha256(payload).hexdigest()),
-            patch.object(data_loading, "MAPPING_ROWS", 4),
+            patch.object(data_loading, "MAPPING_ROWS", 10),
         ):
             table = data_loading.load_ids_mapping(path)
-        self.assertEqual(table.rows[1], {"admission_type_id": "", "description": ""})
-        self.assertEqual(table.rows[2]["admission_type_id"], "admission_source_id")
-        self.assertEqual(table.rows[3]["description"], "Emergency, room")
+        self.assertEqual(table.frame.iloc[2].to_dict(), {"admission_type_id": "", "description": ""})
+        self.assertEqual(table.frame.at[7, "admission_type_id"], "admission_source_id")
+        self.assertEqual(table.frame.at[9, "description"], " Emergency, room ")
+        self.assertEqual(data_loading.parse_ids_mapping(table, sections=data_loading.MAPPING_SECTIONS), {
+            "admission_type_id": {"1": "Emergency", "2": "Not Available"},
+            "discharge_disposition_id": {"1": "NULL", "2": "Not Mapped"},
+            "admission_source_id": {"1": "Unknown/Invalid", "7": "Emergency, room"},
+        })
         self.assertEqual(path.read_bytes(), payload)
+
+    def test_lookup_validation_applies_to_the_requested_sections(self):
+        columns = data_loading.MAPPING_COLUMNS
+        valid_discharge = ("discharge_disposition_id", "description"), ("1", "Home")
+        cases = (
+            ((), "No mapping entries found"),
+            ((*valid_discharge, ("1", "Another description")), "Duplicate lookup code"),
+            ((*valid_discharge, ("2", " ")), "Invalid lookup entry"),
+            ((*valid_discharge, ("-2", "Invalid code")), "Invalid lookup entry"),
+        )
+        for entries, error in cases:
+            with self.subTest(entries=entries):
+                frame = pd.DataFrame([("3", ""), *entries], columns=columns, dtype="string")
+                table = data_loading.RawTable(Path("mapping.csv"), "", 0, frame)
+                with self.assertRaisesRegex(ValueError, f"{error} for discharge_disposition_id"):
+                    data_loading.parse_ids_mapping(table, sections=("discharge_disposition_id",))
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ This report documents preparation of the Any Readmission cohort and the verified
 
 ## 1. Data Loading
 
-The loader verifies the SHA-256 checksum, column order, and row count of both source CSV files. It reads UTF-8 with optional BOM and preserves fields as strings, including identifiers, empty fields, and literal values such as `?` and `None`.
+The loader verifies the SHA-256 checksum, column order, and row count of both source CSV files. The CSV reader checks quoting and the number of fields in every row. It reads UTF-8 with optional BOM and constructs a pandas DataFrame with string values, preserving identifiers with leading zeros, empty fields, and literal values such as `?`, `None`, and `NULL`. Preparation keeps field values as strings and normalizes the configured missing markers before export. EDA and Analysis share a conversion of the eight count columns to nullable integers.
 
 | File | Data rows | Columns | Size (bytes) |
 | --- | ---: | ---: | ---: |
@@ -260,11 +260,13 @@ Empty fields and source missing markers are serialized as `?`. Literal laborator
 
 Weka 3.9.7 loaded all six files. A Java check using Weka's `Instances` API verified relation names, ordered attribute types and domains, row counts, and every parsed value against the CSVs and the applicable nominal policy. Weka also confirmed header compatibility within each modeling stage and correctly decoded a separate fixture with quotes, backslashes, punctuation, control characters, and UTF-8 text. The five model ARFFs preserve the reference attribute declarations and data records.
 
+After the pandas refactor, Weka **3.9.7** on Java **21.0.9** loaded all six newly generated ARFF files. Each file contained 33 attributes, including eight numeric predictors. The relation names, target label order, row counts, and missing-field counts matched the expected results. Train had compatible headers with Validation and Test. Train + Validation had compatible headers with `test_for_train_validation.arff`.
+
 [02_split_export.ipynb](../notebooks/02_split_export.ipynb) ran from a fresh kernel. A separate run from the saved cohort reproduced the four model CSVs, split manifest, six ARFFs, and ARFF audit byte for byte. Use `full_prepared.arff` for exploration, `test.arff` with the Train schema, and `test_for_train_validation.arff` with the Train + Validation schema.
 
 ## 10. Final Validation
 
-The end-to-end suite ran all three preparation notebooks in fresh kernels using Python 3.13.5. Each of two independent workspaces started with the two official raw files, notebook sources, code, and configuration. The run generated 19 files. Their SHA-256 checksums were identical across both workspaces, and both raw files matched their approved checksums after processing.
+After the pandas refactor, two independent workspaces ran all five notebooks in fresh kernels using Python 3.13.5. The JSON configuration used equivalent LF and CRLF line endings. Each run generated 19 Preparation files, 35 EDA files, and 16 Analysis files. All 70 files in each run matched the pre-refactor baseline at `dd5a120` and the other run byte for byte. Both raw files retained their approved checksums. Notebook source files and documentation in both workspaces retained their checksums during execution.
 
 | Check | Verified result |
 | --- | --- |
@@ -274,7 +276,7 @@ The end-to-end suite ran all three preparation notebooks in fresh kernels using 
 | CSV and ARFF consistency | Checked all six ARFF headers, row counts, and decoded values against their CSV sources and fitting scopes. Verified the unseen nominal values and the output checksums in the ARFF audit. |
 | Reproducibility | Both clean runs reproduced all intermediate data, final datasets, manifests, and audits byte for byte. The rerun in the working repository after the ARFF rename also preserved the checksums of the existing inputs and generated outputs. |
 
-The full suite passed 62 tests, including the six end-to-end checks. The documented command-line workflow also generated all 19 files in a clean workspace and preserved the notebook source files. Run it from the repository root with the project environment active using `python -m unittest discover -s tests -v`. If either official raw CSV is absent, the integration class reports a skip and the unit tests can still run. The Weka runtime check is recorded in Section 9. The byte-for-byte comparison uses equivalent LF and CRLF configurations with the same Python version. The preparation manifest records the LF-normalized configuration checksum and the Python version. Earlier manifests remain reusable when their configuration hash represents the same content and all other metadata matches. All three notebooks also ran on an existing LF manifest with a CRLF checkout in a separate workspace. The checksums of both raw files and all 19 existing outputs matched after the rerun.
+The full suite passed **85 tests**, comprising 67 Preparation tests, 3 EDA tests, and 15 Analysis tests. The Preparation tests included six end-to-end checks. Run the suite from the repository root with the project environment active using `python -m unittest discover -s tests -v`. If either official raw CSV is absent, the Preparation integration class reports a skip and the unit tests can still run. The Weka runtime check is recorded in Section 9. The preparation manifest records the LF-normalized configuration checksum and the Python version. Earlier manifests remain reusable when their configuration hash represents the same content and all other metadata matches. All three Preparation notebooks also ran on an existing LF manifest with a CRLF checkout in a separate workspace. The checksums of both raw files and all 19 existing outputs matched after the rerun.
 
 See the [end-to-end tests](../tests/preparation/test_preparation_pipeline.py) for the checks applied to the generated files.
 

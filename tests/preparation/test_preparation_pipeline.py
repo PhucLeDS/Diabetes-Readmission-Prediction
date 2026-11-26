@@ -1,6 +1,7 @@
 """Validate the preparation notebooks from verified raw inputs to saved Weka datasets."""
 
 import asyncio
+import csv
 import os
 import sys
 from collections import Counter
@@ -98,6 +99,15 @@ def _output_hashes(root: Path) -> dict[str, str]:
     }
 
 
+def _read_records(path: Path, *, expected_columns=None):
+    """Read CSV rows independently for the source-to-output comparisons."""
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream, strict=True)
+        if expected_columns is not None and tuple(reader.fieldnames) != tuple(expected_columns):
+            raise AssertionError(f"Unexpected columns in {path}")
+        return reader.fieldnames, list(reader)
+
+
 class PreparationPipelineTests(TestCase):
     @classmethod
     def setUpClass(cls):
@@ -133,9 +143,9 @@ class PreparationPipelineTests(TestCase):
             self.assertEqual(checksum, self.hashes[path], path)
 
     def test_cleaning_changes_only_approved_markers(self):
-        _, raw = read_csv(self.root / "data/raw/diabetic_data.csv", expected_columns=ENCOUNTER_COLUMNS)
-        _, cleaned = read_csv(self.root / "data/interim/cleaned.csv", expected_columns=ENCOUNTER_COLUMNS)
-        _, audit = read_csv(self.root / "outputs/preparation/cleaning_audit.csv")
+        _, raw = _read_records(self.root / "data/raw/diabetic_data.csv", expected_columns=ENCOUNTER_COLUMNS)
+        _, cleaned = _read_records(self.root / "data/interim/cleaned.csv", expected_columns=ENCOUNTER_COLUMNS)
+        _, audit = _read_records(self.root / "outputs/preparation/cleaning_audit.csv")
         markers = self.policy["cleaning"]["missing_markers"]
         literals = self.policy["cleaning"]["preserve_literals"]
         changes, literal_counts = Counter(), Counter()
@@ -160,19 +170,19 @@ class PreparationPipelineTests(TestCase):
                 self.assertEqual(int(row["literal_after"]), literal_counts[column])
 
     def test_cohort_diagnoses_and_predictors_match_the_saved_rows(self):
-        _, cleaned = read_csv(self.root / "data/interim/cleaned.csv", expected_columns=ENCOUNTER_COLUMNS)
+        _, cleaned = _read_records(self.root / "data/interim/cleaned.csv", expected_columns=ENCOUNTER_COLUMNS)
         excluded = set(self.policy["cohort"]["excluded_discharge_codes"])
         eligible = [row for row in cleaned if row["discharge_disposition_id"] not in excluded]
         eligible.sort(key=lambda row: (int(row["encounter_id"]), row["encounter_id"]))
         representatives = {}
         for row in eligible:
             representatives.setdefault(row["patient_nbr"], row)
-        _, cohort = read_csv(self.root / "data/interim/cohort.csv", expected_columns=ENCOUNTER_COLUMNS)
+        _, cohort = _read_records(self.root / "data/interim/cohort.csv", expected_columns=ENCOUNTER_COLUMNS)
         self.assertEqual((len(eligible), len(cohort)), (99_343, 69_990))
 
         predictors = self.policy["feature_selection"]["predictors"]
         header = [*ID_COLUMNS, *predictors, "readmitted"]
-        _, prepared = read_csv(self.root / "data/processed/full_prepared.csv", expected_columns=header)
+        _, prepared = _read_records(self.root / "data/processed/full_prepared.csv", expected_columns=header)
         self.assertEqual(len(header), 35)
 
         manifest = read_json(self.root / "outputs/preparation/preparation_manifest.json")
@@ -210,9 +220,9 @@ class PreparationPipelineTests(TestCase):
         self.assertEqual(manifest["statistics"]["empty_cells_by_column"], {column: empty[column] for column in header})
 
     def test_partitions_isolate_patients_and_derive_exact_model_csvs(self):
-        columns, prepared = read_csv(self.root / "data/processed/full_prepared.csv")
+        columns, prepared = _read_records(self.root / "data/processed/full_prepared.csv")
         keys = ("encounter_id", "patient_nbr", "split")
-        _, manifest = read_csv(self.root / "outputs/preparation/split_manifest.csv", expected_columns=keys)
+        _, manifest = _read_records(self.root / "outputs/preparation/split_manifest.csv", expected_columns=keys)
         groups = {name: [] for name in PARTITIONS}
         patients = set()
         encounters = set()
@@ -236,7 +246,7 @@ class PreparationPipelineTests(TestCase):
         model_tables = {}
         for name, sources in groups.items():
             with self.subTest(split=name):
-                _, model = read_csv(self.root / f"data/processed/{name}.csv", expected_columns=model_columns)
+                _, model = _read_records(self.root / f"data/processed/{name}.csv", expected_columns=model_columns)
                 model_tables[name] = model
                 self.assertEqual(Counter(row["readmitted"] for row in sources), expected_counts[name])
                 for number, (source, projected) in enumerate(zip(sources, model, strict=True), start=1):
@@ -246,7 +256,7 @@ class PreparationPipelineTests(TestCase):
                     ):
                         self.fail(f"{name}.csv row {number} differs from the manifest-selected cohort row.")
 
-        _, combined = read_csv(self.root / "data/processed/train_validation.csv", expected_columns=model_columns)
+        _, combined = _read_records(self.root / "data/processed/train_validation.csv", expected_columns=model_columns)
         self.assertEqual(len(combined), 55_992)
         ordered = chain(model_tables["train"], model_tables["validation"])
         for number, (expected, actual) in enumerate(zip(ordered, combined, strict=True), start=1):
@@ -254,10 +264,10 @@ class PreparationPipelineTests(TestCase):
                 self.fail(f"Train + Validation differs at row {number}.")
 
     def test_arff_headers_and_values_match_csv_and_fitting_scope(self):
-        columns, prepared = read_csv(self.root / "data/processed/full_prepared.csv")
-        predictors = columns[2:-1]
-        _, train = read_csv(self.root / "data/processed/train.csv", expected_columns=[*predictors, "class"])
-        _, development = read_csv(
+        prepared = read_csv(self.root / "data/processed/full_prepared.csv")
+        predictors = list(prepared.columns[2:-1])
+        train = read_csv(self.root / "data/processed/train.csv", expected_columns=[*predictors, "class"])
+        development = read_csv(
             self.root / "data/processed/train_validation.csv", expected_columns=[*predictors, "class"],
         )
         common = {"target": "class", "target_values": ("not_readmitted", "readmitted")}
@@ -278,15 +288,15 @@ class PreparationPipelineTests(TestCase):
         )
         for name, source_csv, schema, allow_unseen in checks:
             with self.subTest(export=name):
-                rows = prepared if name == "full_prepared" else read_csv(self.root / f"data/processed/{source_csv}.csv")[1]
+                frame = prepared if name == "full_prepared" else read_csv(self.root / f"data/processed/{source_csv}.csv")
                 path = Path(f"data/weka/{name}.arff")
                 content = (self.root / path).read_bytes().decode("utf-8")
                 relation = "diabetes_readmission_full_prepared" if name == "full_prepared" else "diabetes_readmission_32_features"
                 self.assertEqual(len(schema), 33)
                 self.assertEqual([column.name for column in schema if column.domain is None], list(COUNT_COLUMNS))
-                validate_arff(content, relation, schema, rows, allow_unseen=allow_unseen)
+                validate_arff(content, relation, schema, frame, allow_unseen=allow_unseen)
                 result = audit["datasets"][name]
-                self.assertEqual((result["rows"], result["attributes"]), (len(rows), len(schema)))
+                self.assertEqual((result["rows"], result["attributes"]), (len(frame), len(schema)))
                 self.assertEqual(result["sha256"], self.hashes[path.as_posix()])
         self.assertEqual(audit["datasets"]["validation"]["unseen_nominal_values_by_column"], {
             "admission_source_id": {"14": 2},

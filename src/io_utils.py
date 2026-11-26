@@ -4,17 +4,16 @@ import csv
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from filecmp import cmp
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, TextIO
 
+import pandas as pd
+
 from src.validation import validate_schema
-
-
-CsvValue = str | int | float | None
 
 
 def ensure_directory(path: Path) -> Path:
@@ -29,10 +28,28 @@ def sha256_file(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def read_csv(
-    path: Path, *, expected_columns: Sequence[str] | None = None,
-) -> tuple[list[str], list[dict[str, str]]]:
-    """Read a UTF-8 CSV table as text, preserving empty fields and literal tokens."""
+def input_checksums(
+    paths: Mapping[str, Path], *, root: Path, normalize_lf: Collection[str] = (),
+) -> dict[str, dict[str, str]]:
+    """Record input hashes, normalizing CRLF only for the specified keys."""
+    checksums = {}
+    for name, path in paths.items():
+        if name in normalize_lf:
+            digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+            mode = "LF line endings"
+        else:
+            digest = sha256_file(path)
+            mode = "exact file bytes"
+        checksums[name] = {
+            "path": path.relative_to(root).as_posix(),
+            "sha256": digest,
+            "checksum_mode": mode,
+        }
+    return checksums
+
+
+def read_csv(path: Path, *, expected_columns: Sequence[str] | None = None) -> pd.DataFrame:
+    """Read a CSV with strict row widths and preserve all field values as text."""
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.reader(stream, strict=True)
         columns = next(reader, [])
@@ -41,18 +58,8 @@ def read_csv(
         for row_number, values in enumerate(reader, start=1):
             if len(values) != len(columns):
                 raise ValueError(f"{path}: unexpected field count in data row {row_number}.")
-            rows.append(dict(zip(columns, values, strict=True)))
-    return columns, rows
-
-
-class _LfCsvStream:
-    """Keep CSV quoting for CR and LF while writing LF record separators."""
-
-    def __init__(self, stream: TextIO) -> None:
-        self.stream = stream
-
-    def write(self, record: str) -> int:
-        return self.stream.write(record.removesuffix("\r\n") + "\n")
+            rows.append(values)
+    return pd.DataFrame(rows, columns=columns, dtype="string")
 
 
 @contextmanager
@@ -90,24 +97,11 @@ def _output_stream(path: Path, *, overwrite: bool) -> Iterator[TextIO]:
             yield stream
 
 
-def write_csv(
-    path: Path,
-    columns: Sequence[str],
-    rows: Iterable[Mapping[str, CsvValue]],
-    *,
-    overwrite: bool = False,
-) -> Path:
-    """Write an ordered UTF-8 CSV table, using empty fields for Python None."""
-    header = tuple(columns)
-    validate_schema(header)
-    expected_keys = set(header)
+def write_csv(path: Path, frame: pd.DataFrame, *, overwrite: bool = False) -> Path:
+    """Write ordered columns in UTF-8 with LF separators and no index."""
+    validate_schema(list(frame.columns))
     with _output_stream(path, overwrite=overwrite) as stream:
-        writer = csv.writer(_LfCsvStream(stream))
-        writer.writerow(header)
-        for row_number, row in enumerate(rows, start=1):
-            if row.keys() != expected_keys:
-                raise ValueError(f"{path}: columns differ from the schema in data row {row_number}.")
-            writer.writerow(row[column] for column in header)
+        frame.to_csv(stream, index=False, lineterminator="\n")
     return path
 
 
@@ -137,3 +131,24 @@ def write_bytes(path: Path, data: bytes, *, overwrite: bool = False) -> Path:
     with _temporary_output(path, overwrite=overwrite) as temporary_path:
         temporary_path.write_bytes(data)
     return path
+
+
+def write_artifacts(
+    output_dir: Path, artifacts: Mapping[Path, bytes], *, overwrite: bool = False,
+) -> None:
+    """Check all destinations for conflicts, then publish each changed file."""
+    pending = []
+    for relative, content in artifacts.items():
+        path = output_dir / relative
+        try:
+            existing = path.read_bytes()
+        except FileNotFoundError:
+            existing = None
+        if existing == content:
+            continue
+        if existing is not None and not overwrite:
+            raise FileExistsError(f"Existing output differs: {path}")
+        pending.append((path, content))
+
+    for path, content in pending:
+        write_bytes(path, content, overwrite=overwrite)

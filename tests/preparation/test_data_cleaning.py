@@ -1,9 +1,10 @@
 """Tests for approved marker replacements and cleaning audit output."""
 
-from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+
+import pandas as pd
 
 from src.io_utils import read_csv, write_json
 from src.preparation.data_cleaning import AUDIT_COLUMNS, clean_encounters, save_cleaning_result
@@ -27,22 +28,21 @@ class CleaningTests(TestCase):
             payer_code="MC", medical_specialty="Cardiology", diag_1="250.1",
             diag_2="V58", diag_3="401", max_glu_serum="Norm",
         )
-        self.table = RawTable(Path("raw.csv"), "", 0, self.columns, [first, second])
+        self.table = RawTable(Path("raw.csv"), "", 0, pd.DataFrame([first, second], dtype="string"))
 
     def test_cleans_only_approved_markers_and_keeps_source_records(self):
-        before = deepcopy(self.table.rows)
+        before = self.table.frame.copy()
         result = clean_encounters(self.table)
-        expected = before[0] | dict.fromkeys(
-            ("race", "gender", "weight", "payer_code", "medical_specialty", "diag_1", "diag_2", "diag_3"), "",
-        )
-        self.assertEqual(result.rows, [expected, before[1]])
-        self.assertEqual(result.columns, tuple(self.columns))
-        self.assertEqual(self.table.rows, before)
+        expected = before.copy()
+        columns = ["race", "gender", "weight", "payer_code", "medical_specialty", "diag_1", "diag_2", "diag_3"]
+        expected.loc[0, columns] = ""
+        pd.testing.assert_frame_equal(result.frame, expected)
+        pd.testing.assert_frame_equal(self.table.frame, before)
 
     def test_audit_covers_every_column_and_distinguishes_markers_from_empty_fields(self):
         result = clean_encounters(self.table)
-        self.assertEqual([row["column"] for row in result.audit], self.columns)
-        audit = {row["column"]: row for row in result.audit}
+        self.assertEqual(result.audit["column"].tolist(), self.columns)
+        audit = result.audit.set_index("column").to_dict(orient="index")
         self.assertEqual(audit["race"]["marker_before"], 1)
         self.assertEqual(audit["race"]["marker_after"], 0)
         self.assertEqual(audit["race"]["empty_before"], 1)
@@ -52,10 +52,10 @@ class CleaningTests(TestCase):
         self.assertEqual(audit["A1Cresult"]["literal_before"], 2)
         self.assertEqual(audit["A1Cresult"]["literal_after"], 2)
         self.assertEqual(audit["A1Cresult"]["empty_after"], 0)
-        self.assertEqual(sum(row["changed_cells"] for row in result.audit), 8)
+        self.assertEqual(result.audit["changed_cells"].sum(), 8)
 
     def test_unapproved_question_marker_is_rejected(self):
-        self.table.rows[0]["change"] = "?"
+        self.table.frame.at[0, "change"] = "?"
         with self.assertRaisesRegex(ValueError, "Unapproved.*'change'.*row 1"):
             clean_encounters(self.table)
 
@@ -74,10 +74,7 @@ class CleaningTests(TestCase):
                 save_cleaning_result(result, cleaned_path=cleaned_path, audit_path=audit_path),
                 (cleaned_path, audit_path),
             )
-        header, rows = read_csv(cleaned_path)
-        self.assertEqual(header, self.columns)
-        self.assertEqual(rows, result.rows)
-        header, audit = read_csv(audit_path)
-        self.assertEqual(header, list(AUDIT_COLUMNS))
+        pd.testing.assert_frame_equal(read_csv(cleaned_path, expected_columns=self.columns), result.frame)
+        audit = read_csv(audit_path, expected_columns=AUDIT_COLUMNS)
         self.assertEqual(len(audit), 50)
-        self.assertEqual(sum(int(row["changed_cells"]) for row in audit), 8)
+        self.assertEqual(audit["changed_cells"].astype(int).sum(), 8)

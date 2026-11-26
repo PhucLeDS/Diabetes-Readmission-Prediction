@@ -5,10 +5,8 @@ from dataclasses import fields
 from hashlib import sha256
 from io import BytesIO
 import json
-import os
 from pathlib import Path
 from platform import python_version
-from tempfile import NamedTemporaryFile
 
 import matplotlib
 from matplotlib import ft2font
@@ -20,7 +18,7 @@ from src.eda.descriptive import QUANTILES, profile_completeness, profile_numeric
 from src.eda.findings import summarize_findings
 from src.eda.nominal import RARE_LEVEL_PERCENT, profile_nominal
 from src.eda.relationships import profile_relationships
-from src.io_utils import sha256_file
+from src.io_utils import input_checksums, write_artifacts
 from src.paths import IDS_MAPPING_PATH, OUTPUT_DIR, PROJECT_ROOT
 from src.preparation.dataset_export import TARGET_MAPPING_CONFIG_PATH
 from src.preparation.dataset_preparation import (
@@ -40,19 +38,7 @@ INPUT_PATHS = {
     "admission_lookup": IDS_MAPPING_PATH,
     "target_config": TARGET_MAPPING_CONFIG_PATH,
 }
-
-
-def _input_checksums() -> dict:
-    inputs = {}
-    for name, path in INPUT_PATHS.items():
-        normalize = name in {"preparation_config", "target_config"}
-        digest = sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() if normalize else sha256_file(path)
-        inputs[name] = {
-            "path": path.relative_to(PROJECT_ROOT).as_posix(),
-            "sha256": digest,
-            "checksum_mode": "LF line endings" if normalize else "exact file bytes",
-        }
-    return inputs
+LF_INPUTS = ("preparation_config", "target_config")
 
 
 def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, artifacts: dict[Path, bytes]) -> dict:
@@ -95,38 +81,6 @@ def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, 
     }
 
 
-def _write_artifacts(output_dir: Path, artifacts: dict[Path, bytes], *, overwrite: bool) -> None:
-    for relative, content in artifacts.items():
-        path = output_dir / relative
-        if path.exists() and path.read_bytes() != content and not overwrite:
-            raise FileExistsError(f"Existing EDA output differs: {path}. Use --overwrite or another --output-dir.")
-    for relative, content in artifacts.items():
-        path = output_dir / relative
-        if path.exists() and path.read_bytes() == content:
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Publish a complete file from the destination filesystem.
-        temp = None
-        try:
-            with NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as stream:
-                temp = Path(stream.name)
-                stream.write(content)
-            if overwrite:
-                temp.replace(path)
-            else:
-                try:
-                    if os.name == "nt":
-                        temp.rename(path)
-                    else:
-                        path.hardlink_to(temp)
-                except FileExistsError:
-                    if path.read_bytes() != content:
-                        raise
-        finally:
-            if temp is not None:
-                temp.unlink(missing_ok=True)
-
-
 def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Path:
     """Generate the same aggregate evidence that the notebook displays."""
     matplotlib.use("Agg")
@@ -134,7 +88,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
 
     from src.eda.plots import plot_nominal_distributions, plot_numeric_distributions, plot_relationships
 
-    inputs = _input_checksums()
+    inputs = input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS)
     eda = load_eda_inputs()
     completeness = profile_completeness(eda.cohort, eda.admission_descriptions)
     numeric = profile_numeric(eda.cohort)
@@ -173,11 +127,11 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
             for figure in figures.values():
                 plt.close(figure)
 
-    if inputs != _input_checksums():
+    if inputs != input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS):
         raise RuntimeError("An EDA input changed during export.")
     manifest = _eda_manifest(inputs, len(eda.cohort), eda.unclear_discharge_count, artifacts)
     artifacts[MANIFEST_PATH] = (json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    _write_artifacts(output_dir, artifacts, overwrite=overwrite)
+    write_artifacts(output_dir, artifacts, overwrite=overwrite)
     return output_dir / MANIFEST_PATH
 
 
@@ -189,7 +143,7 @@ def main() -> None:
     try:
         manifest = export_eda(args.output_dir, overwrite=args.overwrite)
     except FileExistsError as error:
-        parser.exit(1, f"{error}\n")
+        parser.exit(1, f"{error}. Use --overwrite or another --output-dir.\n")
     print(f"EDA manifest: {manifest}")
 
 
