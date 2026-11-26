@@ -82,7 +82,7 @@ The descriptive analysis includes patients assigned to Test. Record any influenc
 
 ## Data Mining and Modeling
 
-Develop rules and models on Train. Fit data-dependent transforms on Train or within each training fold, and use Validation to compare approaches. Once the approach is selected, fit again on Train + Validation and evaluate on the matching Test export. Data mining and model evaluation are the next stages in this repository.
+Develop rules and models on Train. Fit data-dependent transforms on Train or within each training fold, and use Validation to compare approaches. Once the approach is selected, fit again on Train + Validation and evaluate on the matching Test export. The Weka model training pipeline in `weka_java/model_training/` implements this protocol for five classifiers. [Model training guide](weka_java/model_training/README.md)
 
 ## Repository Structure
 
@@ -99,7 +99,7 @@ Develop rules and models on Train. Fit data-dependent transforms on Train or wit
 | `outputs/figures/analysis/` | Locally generated Analysis figures |
 | `reports/` | Methods and verified preparation, EDA, and Analysis results |
 | `tests/` | Unit and end-to-end tests |
-| `weka_java/` | Reserved directories for data mining and model training code |
+| `weka_java/` | Weka Java code: `model_training/` (classifier pipeline and tests) and `data_mining/` (reserved) |
 
 ## Installation and Usage
 
