@@ -44,19 +44,20 @@ class AnalysisExportTests(TestCase):
         for path in (p for p in files if p.suffix == ".csv"):
             content = (self.output_dir / path).read_bytes()
             self.assertNotIn(b"\r", content)
-            columns, _ = read_csv(self.output_dir / path)
+            columns = read_csv(self.output_dir / path).columns
             self.assertTrue({"encounter_id", "patient_nbr"}.isdisjoint(columns))
 
     def test_csv_read_back_preserves_categories_and_evaluation_reference(self):
         def read_table(name):
             return read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")
 
-        _, labs = read_table("lab_results_by_outcome")
+        labs = read_table("lab_results_by_outcome").to_dict(orient="records")
         none_counts = {row["column"]: int(row["patients"]) for row in labs if row["value"] == "None"}
         self.assertEqual(none_counts, {"A1Cresult": 57144, "max_glu_serum": 66641})
         self.assertTrue(all(not row["percent_of_recorded_results"] for row in labs if row["value"] == "None"))
-        columns, evaluation = read_table("analysis_evaluation_map")
-        self.assertNotIn("status", columns)
+        evaluation_table = read_table("analysis_evaluation_map")
+        self.assertNotIn("status", evaluation_table.columns)
+        evaluation = evaluation_table.to_dict(orient="records")
         self.assertEqual([row["question_id"] for row in evaluation], ["Q1", "Q2", "Q3", "Q4"])
         for row in evaluation:
             self.assertTrue(all((self.output_dir / TABLE_DIR / name).is_file()

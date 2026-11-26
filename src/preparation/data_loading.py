@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.io_utils import read_csv_frame, sha256_file
+from src.io_utils import read_csv, sha256_file
 from src.paths import IDS_MAPPING_PATH, RAW_DATA_PATH
 from src.validation import validate_target, validate_unique_ids
 
@@ -59,7 +59,7 @@ def _load_verified_csv(
     checksum = sha256_file(path)
     if checksum != expected_sha256:
         raise ValueError(f"{path}: SHA-256 mismatch. Expected {expected_sha256}, got {checksum}.")
-    frame = read_csv_frame(path, expected_columns=expected_columns)
+    frame = read_csv(path, expected_columns=expected_columns)
     after = path.stat()
     if (before.st_ino, before.st_size, before.st_mtime_ns) != (
         after.st_ino, after.st_size, after.st_mtime_ns,

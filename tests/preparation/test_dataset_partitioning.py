@@ -5,10 +5,13 @@ from shutil import copyfile
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+import pandas as pd
+
 from src.io_utils import read_csv, read_json
 from src.preparation.dataset_export import (
     SPLIT_CONFIG_PATH,
     TARGET_MAPPING_CONFIG_PATH,
+    load_target_mapping,
     make_split_assignments,
     map_binary_targets,
     save_model_partitions,
@@ -20,7 +23,7 @@ class PartitionTests(TestCase):
     def setUp(self):
         predictors = read_json(PREPARATION_CONFIG_PATH)["feature_selection"]["predictors"]
         self.columns = ["encounter_id", "patient_nbr", *predictors, "readmitted"]
-        self.rows = []
+        rows = []
         for index in range(1, 31):
             row = dict.fromkeys(self.columns, "0")
             row.update(
@@ -31,23 +34,26 @@ class PartitionTests(TestCase):
                 A1Cresult="None",
                 num_medications=str(index),
             )
-            self.rows.append(row)
+            rows.append(row)
+        self.frame = pd.DataFrame(rows, columns=self.columns, dtype="string")
+        self.mapping = load_target_mapping()
 
     def test_rank_order_and_largest_remainder_class_tie(self):
-        assignments = make_split_assignments(self.rows)
+        assignments = make_split_assignments(self.frame)
         self.assertEqual({key for key, name in assignments.items() if name == "test"}, {
             "1", "10", "12", "14", "24", "29",
         })
         self.assertEqual({key for key, name in assignments.items() if name == "validation"}, {
             "6", "9", "13", "15", "30",
         })
-        self.assertEqual(set(assignments), {row["encounter_id"] for row in self.rows})
-        self.assertEqual(assignments, make_split_assignments(self.rows[::-1]))
+        self.assertEqual(set(assignments), set(self.frame["encounter_id"]))
+        self.assertEqual(assignments, make_split_assignments(self.frame.iloc[::-1]))
 
     def test_duplicate_patients_and_encounters_are_rejected(self):
         for key in ("patient_nbr", "encounter_id"):
             with self.subTest(key=key):
-                invalid = [self.rows[0], self.rows[1] | {key: self.rows[0][key]}, *self.rows[2:]]
+                invalid = self.frame.copy()
+                invalid.at[1, key] = invalid.at[0, key]
                 with self.assertRaisesRegex(ValueError, f"Duplicate {key}"):
                     make_split_assignments(invalid)
 
@@ -60,29 +66,31 @@ class PartitionTests(TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             self.copy_export_configuration(root)
-            mapped = map_binary_targets(self.rows)
-            summary = save_model_partitions(self.columns, mapped[::-1], project_root=root)
+            mapped = map_binary_targets(self.frame, mapping=self.mapping)
+            summary = save_model_partitions(mapped.iloc[::-1], project_root=root)
 
-            columns, train = read_csv(root / "data/processed/train.csv")
-            _, validation = read_csv(root / "data/processed/validation.csv", expected_columns=columns)
-            _, test = read_csv(root / "data/processed/test.csv", expected_columns=columns)
-            _, combined = read_csv(root / "data/processed/train_validation.csv", expected_columns=columns)
-            manifest_columns, manifest = read_csv(root / "outputs/preparation/split_manifest.csv")
+            columns = self.columns[2:-1] + ["class"]
+            train, validation, test, combined = (
+                read_csv(root / f"data/processed/{name}.csv", expected_columns=columns)
+                for name in ("train", "validation", "test", "train_validation")
+            )
+            manifest = read_csv(
+                root / "outputs/preparation/split_manifest.csv",
+                expected_columns=["encounter_id", "patient_nbr", "split"],
+            )
 
-            self.assertEqual(columns, self.columns[2:-1] + ["class"])
             self.assertEqual((len(train), len(validation), len(test), len(combined)), (19, 5, 6, 24))
-            self.assertEqual(combined, train + validation)
-            self.assertEqual(manifest_columns, ["encounter_id", "patient_nbr", "split"])
-            self.assertEqual([row["encounter_id"] for row in manifest], [str(i) for i in range(1, 31)])
-            self.assertEqual(len({row["patient_nbr"] for row in manifest}), 30)
-            for name, rows in (("train", train), ("validation", validation), ("test", test)):
-                encounter_ids = [row["encounter_id"] for row in manifest if row["split"] == name]
-                self.assertEqual([row["num_medications"] for row in rows], encounter_ids)
-            self.assertTrue(all(row["A1Cresult"] == "None" for row in combined))
+            pd.testing.assert_frame_equal(combined, pd.concat([train, validation], ignore_index=True))
+            self.assertEqual(manifest["encounter_id"].tolist(), [str(i) for i in range(1, 31)])
+            self.assertEqual(manifest["patient_nbr"].nunique(), 30)
+            for name, partition in (("train", train), ("validation", validation), ("test", test)):
+                encounter_ids = manifest.loc[manifest["split"].eq(name), "encounter_id"].tolist()
+                self.assertEqual(partition["num_medications"].tolist(), encounter_ids)
+            self.assertTrue(combined["A1Cresult"].eq("None").all())
             self.assertEqual(summary["validation"]["original_labels"], {"NO": 2, "<30": 2, ">30": 1})
             self.assertEqual(summary["validation"]["binary_classes"], {"not_readmitted": 2, "readmitted": 3})
             self.assertEqual(summary["validation"]["empty_cells_by_column"]["race"], 2)
-            self.assertEqual(summary, save_model_partitions(self.columns, mapped, project_root=root))
+            self.assertEqual(summary, save_model_partitions(mapped, project_root=root))
 
     def test_existing_mismatched_export_is_preserved_without_creating_other_outputs(self):
         with TemporaryDirectory() as directory:
@@ -92,7 +100,7 @@ class PartitionTests(TestCase):
             test_path.parent.mkdir(parents=True)
             test_path.write_bytes(b"stale\n")
             with self.assertRaisesRegex(FileExistsError, "Existing output differs"):
-                save_model_partitions(self.columns, map_binary_targets(self.rows), project_root=root)
+                save_model_partitions(map_binary_targets(self.frame, mapping=self.mapping), project_root=root)
             self.assertEqual(test_path.read_bytes(), b"stale\n")
             self.assertEqual(list(test_path.parent.iterdir()), [test_path])
             self.assertFalse((root / "outputs").exists())
@@ -101,8 +109,8 @@ class PartitionTests(TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             self.copy_export_configuration(root)
-            mapped = map_binary_targets(self.rows)
-            mapped[0]["class"] = "readmitted"
+            mapped = map_binary_targets(self.frame, mapping=self.mapping)
+            mapped.at[0, "class"] = "readmitted"
             with self.assertRaisesRegex(ValueError, "Binary class disagrees"):
-                save_model_partitions(self.columns, mapped, project_root=root)
+                save_model_partitions(mapped, project_root=root)
             self.assertFalse((root / "data").exists())

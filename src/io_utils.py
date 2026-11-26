@@ -4,7 +4,7 @@ import csv
 import hashlib
 import json
 import os
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from filecmp import cmp
 from pathlib import Path
@@ -14,9 +14,6 @@ from typing import Any, TextIO
 import pandas as pd
 
 from src.validation import validate_schema
-
-
-CsvValue = str | int | float | None
 
 
 def ensure_directory(path: Path) -> Path:
@@ -51,9 +48,8 @@ def input_checksums(
     return checksums
 
 
-def _read_csv_rows(
-    path: Path, *, expected_columns: Sequence[str] | None,
-) -> tuple[list[str], list[list[str]]]:
+def read_csv(path: Path, *, expected_columns: Sequence[str] | None = None) -> pd.DataFrame:
+    """Read a CSV with strict row widths and preserve all field values as text."""
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.reader(stream, strict=True)
         columns = next(reader, [])
@@ -63,21 +59,7 @@ def _read_csv_rows(
             if len(values) != len(columns):
                 raise ValueError(f"{path}: unexpected field count in data row {row_number}.")
             rows.append(values)
-    return columns, rows
-
-
-def read_csv_frame(path: Path, *, expected_columns: Sequence[str] | None = None) -> pd.DataFrame:
-    """Read a CSV with strict row widths and preserve all field values as text."""
-    columns, rows = _read_csv_rows(path, expected_columns=expected_columns)
     return pd.DataFrame(rows, columns=columns, dtype="string")
-
-
-def read_csv(
-    path: Path, *, expected_columns: Sequence[str] | None = None,
-) -> tuple[list[str], list[dict[str, str]]]:
-    """Read text records for callers that still use the record-based interface."""
-    columns, rows = _read_csv_rows(path, expected_columns=expected_columns)
-    return columns, [dict(zip(columns, values, strict=True)) for values in rows]
 
 
 @contextmanager
@@ -115,31 +97,12 @@ def _output_stream(path: Path, *, overwrite: bool) -> Iterator[TextIO]:
             yield stream
 
 
-def write_csv_frame(path: Path, frame: pd.DataFrame, *, overwrite: bool = False) -> Path:
+def write_csv(path: Path, frame: pd.DataFrame, *, overwrite: bool = False) -> Path:
     """Write ordered columns in UTF-8 with LF separators and no index."""
     validate_schema(list(frame.columns))
     with _output_stream(path, overwrite=overwrite) as stream:
         frame.to_csv(stream, index=False, lineterminator="\n")
     return path
-
-
-def write_csv(
-    path: Path,
-    columns: Sequence[str],
-    rows: Iterable[Mapping[str, CsvValue]],
-    *,
-    overwrite: bool = False,
-) -> Path:
-    """Write records for callers that still use the record-based interface."""
-    header = tuple(columns)
-    validate_schema(header)
-    expected_keys = set(header)
-    values = []
-    for row_number, row in enumerate(rows, start=1):
-        if row.keys() != expected_keys:
-            raise ValueError(f"{path}: columns differ from the schema in data row {row_number}.")
-        values.append(["" if row[column] is None else str(row[column]) for column in header])
-    return write_csv_frame(path, pd.DataFrame(values, columns=header, dtype="string"), overwrite=overwrite)
 
 
 def read_json(path: Path) -> Any:

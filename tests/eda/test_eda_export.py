@@ -67,12 +67,12 @@ class EdaExportTests(TestCase):
         self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 24, ".png": 10})
         for relative in files:
             if relative.endswith(".csv"):
-                columns, _ = read_csv(self.output_dir / relative)
+                columns = read_csv(self.output_dir / relative).columns
                 self.assertTrue({"encounter_id", "patient_nbr"}.isdisjoint(columns), relative)
 
     def test_exported_evidence_reconciles_across_tables(self) -> None:
         def table(name: str) -> list[dict[str, str]]:
-            return read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")[1]
+            return read_csv(self.output_dir / TABLE_DIR / f"{name}.csv").to_dict(orient="records")
 
         dictionary = table("column_dictionary")
         self.assertEqual(Counter(row["role"] for row in dictionary), {

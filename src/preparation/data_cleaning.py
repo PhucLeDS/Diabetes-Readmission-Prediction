@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.io_utils import read_json, write_csv_frame
+from src.io_utils import read_json, write_csv
 from src.paths import CONFIG_DIR, INTERIM_DIR, PREPARATION_OUTPUT_DIR
 from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, ID_COLUMNS, TARGET_COLUMN, RawTable
 from src.validation import validate_schema
@@ -100,6 +100,6 @@ def save_cleaning_result(
     audit_path: Path = CLEANING_AUDIT_PATH,
 ) -> tuple[Path, Path]:
     """Write the cleaned dataset and audit with the project's CSV conventions."""
-    write_csv_frame(cleaned_path, result.frame)
-    write_csv_frame(audit_path, result.audit)
+    write_csv(cleaned_path, result.frame)
+    write_csv(audit_path, result.audit)
     return cleaned_path, audit_path

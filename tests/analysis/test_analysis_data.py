@@ -44,7 +44,8 @@ class AnalysisInputTests(TestCase):
     def save_fixture(self, *, overwrite=False):
         data_key = FULL_PREPARED_PATH.relative_to(PROJECT_ROOT).as_posix()
         config_key = PREPARATION_CONFIG_PATH.relative_to(PROJECT_ROOT).as_posix()
-        csv_path = write_csv(self.root / data_key, self.columns, self.rows, overwrite=overwrite)
+        frame = pd.DataFrame(self.rows, columns=self.columns, dtype="string")
+        csv_path = write_csv(self.root / data_key, frame, overwrite=overwrite)
         write_json(self.root / PREPARATION_MANIFEST_PATH.relative_to(PROJECT_ROOT), {
             "dataset_path": data_key,
             "configuration": {"path": config_key, "sha256": sha256_file(self.root / config_key)},

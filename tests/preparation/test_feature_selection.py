@@ -113,9 +113,7 @@ class FeatureSelectionTests(TestCase):
         path = self.directory / "feature_audit.csv"
         save_feature_audit(result, audit_path=path)
         save_feature_audit(result, audit_path=path)
-        columns, rows = read_csv(path)
-        self.assertEqual(columns, list(FEATURE_AUDIT_COLUMNS))
-        self.assertEqual(len(rows), len(audit))
-        by_name = {row["column"]: row for row in rows}
-        self.assertEqual(by_name["readmitted"]["output_position"], "35")
-        self.assertEqual(by_name["weight"]["empty_after"], "")
+        saved = read_csv(path, expected_columns=FEATURE_AUDIT_COLUMNS).set_index("column")
+        self.assertEqual(len(saved), len(audit))
+        self.assertEqual(saved.at["readmitted", "output_position"], "35")
+        self.assertEqual(saved.at["weight", "empty_after"], "")

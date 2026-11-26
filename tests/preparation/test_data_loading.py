@@ -27,7 +27,7 @@ class RawLoadingTests(unittest.TestCase):
 
     def load_fixture(self, rows, *, columns=data_loading.ENCOUNTER_COLUMNS, expected_rows=None):
         path = self.directory / "diabetic_data.csv"
-        write_csv(path, columns, rows, overwrite=True)
+        write_csv(path, pd.DataFrame(rows, columns=columns, dtype="string"), overwrite=True)
         contents = path.read_bytes()
         checksum = sha256(contents).hexdigest()
         with (

@@ -96,13 +96,13 @@ class CohortTests(TestCase):
         audit_path = self.directory / "cohort_audit.csv"
         for _ in range(2):
             save_cohort_result(result, cohort_path=cohort_path, audit_path=audit_path)
-        self.assertEqual(
-            read_csv(cohort_path), (list(ENCOUNTER_COLUMNS), self.frame.iloc[[2, 4]].to_dict(orient="records")),
+        pd.testing.assert_frame_equal(
+            read_csv(cohort_path, expected_columns=ENCOUNTER_COLUMNS),
+            self.frame.iloc[[2, 4]].reset_index(drop=True),
         )
-        header, audit = read_csv(audit_path)
-        self.assertEqual(header, list(AUDIT_COLUMNS))
-        self.assertEqual([row["column"] for row in audit], list(ENCOUNTER_COLUMNS))
-        race = next(row for row in audit if row["column"] == "race")
+        audit = read_csv(audit_path, expected_columns=AUDIT_COLUMNS)
+        self.assertEqual(audit["column"].tolist(), list(ENCOUNTER_COLUMNS))
+        race = audit.set_index("column").loc["race"]
         self.assertEqual(
             [race[f"{stage}_empty"] for stage in ("cleaned", "eligible", "cohort")],
             ["2", "1", "1"],

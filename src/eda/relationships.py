@@ -9,7 +9,9 @@ from src.eda.data import MEDICATION_COLUMNS
 from src.eda.descriptive import PRIOR_VISIT_COLUMNS, QUANTILES, _with_percent
 from src.eda.nominal import AGE_BANDS
 from src.preparation.data_loading import TARGET_COLUMN, TARGET_LABELS
-from src.preparation.dataset_export import CLASS_LABELS, TARGET_MAPPING_CONFIG_PATH, load_target_mapping
+from src.preparation.dataset_export import (
+    CLASS_LABELS, TARGET_MAPPING_CONFIG_PATH, load_target_mapping, map_readmission_labels,
+)
 
 
 STAY_COLUMN = "time_in_hospital"
@@ -86,9 +88,7 @@ def _medication_flags(cohort: pd.DataFrame) -> pd.DataFrame:
 def _outcome_distribution(cohort: pd.DataFrame, target_config_path: Path) -> pd.DataFrame:
     mapping = load_target_mapping(target_config_path)
     original = cohort[TARGET_COLUMN]
-    binary = original.map(mapping)
-    if binary.isna().any():
-        raise ValueError("The cohort contains a readmission label outside the target mapping.")
+    binary = map_readmission_labels(original, mapping)
     original_counts = original.value_counts()
     binary_counts = binary.value_counts()
     rows = [

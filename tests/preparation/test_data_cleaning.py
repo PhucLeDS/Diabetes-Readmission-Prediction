@@ -6,7 +6,7 @@ from unittest import TestCase
 
 import pandas as pd
 
-from src.io_utils import read_csv, read_csv_frame, write_json
+from src.io_utils import read_csv, write_json
 from src.preparation.data_cleaning import AUDIT_COLUMNS, clean_encounters, save_cleaning_result
 from src.preparation.data_loading import ENCOUNTER_COLUMNS, RawTable
 
@@ -74,8 +74,7 @@ class CleaningTests(TestCase):
                 save_cleaning_result(result, cleaned_path=cleaned_path, audit_path=audit_path),
                 (cleaned_path, audit_path),
             )
-        pd.testing.assert_frame_equal(read_csv_frame(cleaned_path, expected_columns=self.columns), result.frame)
-        header, audit = read_csv(audit_path)
-        self.assertEqual(header, list(AUDIT_COLUMNS))
+        pd.testing.assert_frame_equal(read_csv(cleaned_path, expected_columns=self.columns), result.frame)
+        audit = read_csv(audit_path, expected_columns=AUDIT_COLUMNS)
         self.assertEqual(len(audit), 50)
-        self.assertEqual(sum(int(row["changed_cells"]) for row in audit), 8)
+        self.assertEqual(audit["changed_cells"].astype(int).sum(), 8)

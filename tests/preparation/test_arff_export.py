@@ -2,6 +2,8 @@
 
 from unittest import TestCase
 
+import pandas as pd
+
 from src.preparation.dataset_export import (
     CLASS_COLUMN,
     CLASS_LABELS,
@@ -17,18 +19,19 @@ from src.preparation.dataset_export import (
 class ArffExportTests(TestCase):
     def setUp(self):
         self.columns = ("admission_source_id", "number_inpatient", "A1Cresult", "diag_1_group")
-        self.train = [{
+        train = {
             "admission_source_id": "1",
             "number_inpatient": "2",
             "A1Cresult": "None",
             "diag_1_group": "Missing",
             CLASS_COLUMN: "not_readmitted",
-        }]
-        self.validation = [self.train[0] | {
+        }
+        self.train = pd.DataFrame([train], dtype="string")
+        self.validation = pd.DataFrame([train | {
             "admission_source_id": "14",
             "number_inpatient": "",
             CLASS_COLUMN: "readmitted",
-        }]
+        }], dtype="string")
 
     def schema(self, training_rows):
         return create_arff_schema(
@@ -51,13 +54,12 @@ class ArffExportTests(TestCase):
 
     def test_unseen_category_depends_on_fitting_scope(self):
         development = self.schema(self.train)
-        final = self.schema(self.train + self.validation)
+        final = self.schema(pd.concat([self.train, self.validation], ignore_index=True))
         self.assertEqual(final[0].domain, ("1", "14"))
         with self.assertRaisesRegex(ValueError, "Unseen value"):
             make_arff("model", development, self.validation)
-        source = [self.validation[0].copy()]
-        self.validation[0]["number_inpatient"] = "?"
-        source[0]["number_inpatient"] = "?"
+        self.validation.at[0, "number_inpatient"] = "?"
+        source = self.validation.copy()
 
         text, audit = make_arff("model", development, self.validation, allow_unseen=True)
         validate_arff(text, "model", development, self.validation, allow_unseen=True)
@@ -68,11 +70,11 @@ class ArffExportTests(TestCase):
         validate_arff(text, "model", final, self.validation, allow_unseen=True)
         self.assertTrue(text.endswith("'14',?,'None','Missing','readmitted'\n"))
         self.assertEqual(audit["unseen_nominal_values_by_column"], {})
-        self.assertEqual(self.validation, source)
+        pd.testing.assert_frame_equal(self.validation, source)
 
     def test_quoted_literal_round_trip(self):
         value = "O'Reilly, 50% \"test\" \\line\n\r\t\b\f"
-        rows = [{"arbitrary field": value, CLASS_COLUMN: "readmitted"}]
+        rows = pd.DataFrame([{"arbitrary field": value, CLASS_COLUMN: "readmitted"}], dtype="string")
         schema = create_arff_schema(("arbitrary field",), rows, target=CLASS_COLUMN, target_values=CLASS_LABELS)
         content, _ = make_arff("rel,ation", schema, rows)
         self.assertIn(r"'O\'Reilly, 50\% \"test\" \\line\n\r\t\b\f'", content)
@@ -84,10 +86,10 @@ class ArffExportTests(TestCase):
         schema = self.schema(self.train)
         for value in ("", "?", "NO"):
             with self.subTest(target=value), self.assertRaisesRegex(ValueError, "Invalid ARFF target"):
-                make_arff("model", schema, [self.train[0] | {CLASS_COLUMN: value}], allow_unseen=True)
+                make_arff("model", schema, self.train.assign(**{CLASS_COLUMN: value}), allow_unseen=True)
         for value in ("True", "NaN", "1e999"):
             with self.subTest(numeric=value), self.assertRaisesRegex(ValueError, "Invalid numeric"):
-                make_arff("model", schema, [self.train[0] | {"number_inpatient": value}])
+                make_arff("model", schema, self.train.assign(number_inpatient=value))
 
     def test_read_back_rejects_mismatched_relation_row_and_type(self):
         schema = self.schema(self.train)

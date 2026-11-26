@@ -10,6 +10,8 @@ from io import StringIO
 from math import floor, isfinite
 from pathlib import Path
 
+import pandas as pd
+
 from src.io_utils import read_csv, read_json, sha256_file, write_csv, write_json, write_text
 from src.paths import PREPARATION_OUTPUT_DIR, PROCESSED_DIR, PROJECT_ROOT, WEKA_DIR
 from src.preparation.data_loading import COUNT_COLUMNS, ID_COLUMNS, TARGET_COLUMN, TARGET_LABELS
@@ -33,7 +35,7 @@ CLASS_COLUMN = "class"
 CLASS_LABELS = ("not_readmitted", "readmitted")
 
 
-def load_full_prepared(*, project_root: Path = PROJECT_ROOT) -> tuple[list[str], list[dict[str, str]]]:
+def load_full_prepared(*, project_root: Path = PROJECT_ROOT) -> pd.DataFrame:
     """Read the verified Phase II CSV and retain its exact field values."""
     data_path = FULL_PREPARED_PATH.relative_to(PROJECT_ROOT)
     config_path = PREPARATION_CONFIG_PATH.relative_to(PROJECT_ROOT)
@@ -57,18 +59,30 @@ def load_full_prepared(*, project_root: Path = PROJECT_ROOT) -> tuple[list[str],
     if len(predictors) != 32 or CLASS_COLUMN in predictors:
         raise ValueError("The preparation configuration must declare 32 predictors without the model class.")
     validate_schema([entry["name"] for entry in manifest["schema"]], expected=expected_columns)
-    columns, rows = read_csv(csv_path, expected_columns=expected_columns)
+    frame = read_csv(csv_path, expected_columns=expected_columns)
 
     statistics = manifest["statistics"]
-    if not rows or (len(rows), len(columns)) != (statistics["rows"], statistics["columns"]):
+    if frame.empty or frame.shape != (statistics["rows"], statistics["columns"]):
         raise ValueError("Full prepared CSV dimensions differ from the preparation manifest.")
     for column in ID_COLUMNS:
-        validate_unique_ids((row[column] for row in rows), name=f"prepared {column}")
-    validate_target((row[TARGET_COLUMN] for row in rows), allowed=TARGET_LABELS)
-    counts = Counter(row[TARGET_COLUMN] for row in rows)
-    if {label: counts[label] for label in TARGET_LABELS} != statistics["target_counts"]:
+        validate_unique_ids(frame[column], name=f"prepared {column}")
+    validate_target(frame[TARGET_COLUMN], allowed=TARGET_LABELS)
+    counts = frame[TARGET_COLUMN].value_counts()
+    if {label: int(counts.get(label, 0)) for label in TARGET_LABELS} != statistics["target_counts"]:
         raise ValueError("Original label counts differ from the preparation manifest.")
-    return columns, rows
+    return frame
+
+
+def parse_count_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert the prepared count fields to nullable integers for analysis."""
+    parsed = {}
+    for column in COUNT_COLUMNS:
+        values = frame[column]
+        valid = values.eq("") | values.str.fullmatch(r"[0-9]+", na=False)
+        if not valid.fillna(False).all():
+            raise ValueError(f"{column!r} must contain nonnegative integers or empty fields.")
+        parsed[column] = values.replace("", pd.NA).astype("Int64")
+    return frame.assign(**parsed)
 
 
 def load_target_mapping(config_path: Path = TARGET_MAPPING_CONFIG_PATH) -> dict[str, str]:
@@ -91,37 +105,39 @@ def load_target_mapping(config_path: Path = TARGET_MAPPING_CONFIG_PATH) -> dict[
     return mapping
 
 
-def map_binary_targets(
-    rows: Sequence[Mapping[str, str]], *, config_path: Path = TARGET_MAPPING_CONFIG_PATH,
-) -> list[dict[str, str]]:
-    """Append class to copies of the records while retaining identifiers and source labels."""
-    mapping = load_target_mapping(config_path)
-    validate_target((row.get(TARGET_COLUMN, "") for row in rows), allowed=mapping)
-    if any(CLASS_COLUMN in row for row in rows):
+def map_readmission_labels(labels: pd.Series, mapping: Mapping[str, str]) -> pd.Series:
+    """Map verified source labels to the binary class in the same row order."""
+    mapped = labels.map(mapping)
+    invalid = mapped.isna()
+    if invalid.any():
+        position = int(invalid.to_numpy().argmax())
+        raise ValueError(f"Unexpected target value in data row {position + 1}: {labels.iloc[position]!r}.")
+    return mapped.astype("string").rename(CLASS_COLUMN)
+
+
+def map_binary_targets(prepared: pd.DataFrame, *, mapping: Mapping[str, str]) -> pd.DataFrame:
+    """Append class while retaining identifiers and the original source labels."""
+    if CLASS_COLUMN in prepared.columns:
         raise ValueError(f"Input records already contain the {CLASS_COLUMN!r} column.")
-    return [{**row, CLASS_COLUMN: mapping[row[TARGET_COLUMN]]} for row in rows]
+    validate_required_columns(prepared.columns, (TARGET_COLUMN,))
+    return prepared.assign(**{CLASS_COLUMN: map_readmission_labels(prepared[TARGET_COLUMN], mapping)})
 
 
-def build_model_dataset(
-    prepared_columns: Sequence[str], mapped_rows: Sequence[Mapping[str, str]],
-) -> tuple[list[str], list[dict[str, str]]]:
+def build_model_dataset(mapped: pd.DataFrame) -> pd.DataFrame:
     """Project onto the ordered predictors followed by the binary class."""
-    validate_schema(prepared_columns)
+    validate_required_columns(mapped.columns, (CLASS_COLUMN,))
+    prepared_columns = [column for column in mapped.columns if column != CLASS_COLUMN]
+    validate_schema(list(mapped.columns))
     if (
         len(prepared_columns) != 35
         or tuple(prepared_columns[:2]) != ID_COLUMNS
         or prepared_columns[-1] != TARGET_COLUMN
-        or CLASS_COLUMN in prepared_columns
     ):
         raise ValueError("Expected two identifiers, 32 predictors, and the original label in prepared order.")
 
     model_columns = [*prepared_columns[2:-1], CLASS_COLUMN]
-    validate_target((row.get(CLASS_COLUMN, "") for row in mapped_rows), allowed=CLASS_LABELS)
-    model_rows = []
-    for row in mapped_rows:
-        validate_required_columns(row, model_columns)
-        model_rows.append({column: row[column] for column in model_columns})
-    return model_columns, model_rows
+    validate_target(mapped[CLASS_COLUMN].fillna(""), allowed=CLASS_LABELS)
+    return mapped.loc[:, model_columns]
 
 
 SPLIT_CONFIG_PATH = PROJECT_ROOT / "config" / "split.json"
@@ -159,7 +175,7 @@ def _rank(seed: int, stage: str, encounter_id: str) -> tuple[bytes, int, str]:
 
 
 def make_split_assignments(
-    rows: Sequence[Mapping[str, str]], *, config_path: Path = SPLIT_CONFIG_PATH,
+    frame: pd.DataFrame, *, config_path: Path = SPLIT_CONFIG_PATH,
 ) -> dict[str, str]:
     """Allocate test first, then validation from development, by the original labels."""
     config = read_json(config_path)
@@ -179,21 +195,22 @@ def make_split_assignments(
         ratios.append(ratio)
     test_ratio, validation_ratio = ratios
 
+    validate_required_columns(frame.columns, (*ID_COLUMNS, TARGET_COLUMN))
     for column in ID_COLUMNS:
-        validate_unique_ids((row.get(column, "") for row in rows), name=column)
-    validate_target((row.get(TARGET_COLUMN, "") for row in rows), allowed=TARGET_LABELS)
+        validate_unique_ids(frame[column], name=column)
+    validate_target(frame[TARGET_COLUMN].fillna(""), allowed=TARGET_LABELS)
     encounter_column = ID_COLUMNS[0]
-    groups: dict[str, list[str]] = {label: [] for label in TARGET_LABELS}
-    for row in rows:
-        identifier = row[encounter_column]
-        if not isinstance(identifier, str) or not identifier.isascii() or not identifier.isdecimal():
-            raise ValueError("Encounter IDs must be strings of ASCII decimal digits.")
-        groups[row[TARGET_COLUMN]].append(identifier)
+    if not all(isinstance(value, str) and value.isascii() and value.isdecimal() for value in frame[encounter_column]):
+        raise ValueError("Encounter IDs must be strings of ASCII decimal digits.")
+    groups = {
+        label: frame.loc[frame[TARGET_COLUMN].eq(label), encounter_column].tolist()
+        for label in TARGET_LABELS
+    }
     if any(not group for group in groups.values()):
         raise ValueError("All three original target labels must occur before splitting.")
 
-    test_size = _rounded_size(len(rows), test_ratio)
-    validation_size = _rounded_size(len(rows) - test_size, validation_ratio)
+    test_size = _rounded_size(len(frame), test_ratio)
+    validation_size = _rounded_size(len(frame) - test_size, validation_ratio)
     assignments = {}
     for stage, size in (("test", test_size), ("validation", validation_size)):
         quotas = _class_quotas(groups, size)
@@ -207,87 +224,78 @@ def make_split_assignments(
     return assignments
 
 
-def _partition_statistics(
-    source_rows: Sequence[Mapping[str, str]], columns: Sequence[str], model_rows: Sequence[Mapping[str, str]],
-) -> dict:
+def _assigned_cohort(frame: pd.DataFrame, project_root: Path) -> pd.DataFrame:
+    assignments = make_split_assignments(
+        frame, config_path=project_root / SPLIT_CONFIG_PATH.relative_to(PROJECT_ROOT),
+    )
+    encounter = frame["encounter_id"]
+    return (
+        frame.assign(encounter_number=encounter.map(int), split=encounter.map(assignments).astype("string"))
+        .sort_values(["encounter_number", "encounter_id"])
+        .drop(columns="encounter_number")
+        .reset_index(drop=True)
+    )
+
+
+def _partition_statistics(source: pd.DataFrame, model: pd.DataFrame) -> dict:
     """Count original labels, binary classes, and empty fields for one export."""
-    original_counts = Counter(row[TARGET_COLUMN] for row in source_rows)
-    class_counts = Counter(row[CLASS_COLUMN] for row in model_rows)
-    empty_counts = Counter()
-    rows_with_empty_fields = 0
-    for row in model_rows:
-        empty_columns = [column for column, value in row.items() if value == ""]
-        empty_counts.update(empty_columns)
-        rows_with_empty_fields += bool(empty_columns)
+    original_counts = source[TARGET_COLUMN].value_counts()
+    class_counts = model[CLASS_COLUMN].value_counts()
+    empty = model.eq("")
     return {
-        "rows": len(model_rows),
-        "columns": len(columns),
-        "original_labels": {label: original_counts[label] for label in TARGET_LABELS},
-        "binary_classes": {label: class_counts[label] for label in CLASS_LABELS},
-        "empty_cells_by_column": {column: empty_counts[column] for column in columns},
-        "rows_with_empty_fields": rows_with_empty_fields,
+        "rows": len(model),
+        "columns": len(model.columns),
+        "original_labels": {label: int(original_counts.get(label, 0)) for label in TARGET_LABELS},
+        "binary_classes": {label: int(class_counts.get(label, 0)) for label in CLASS_LABELS},
+        "empty_cells_by_column": {column: int(count) for column, count in empty.sum().items()},
+        "rows_with_empty_fields": int(empty.any(axis=1).sum()),
     }
 
 
 def save_model_partitions(
-    prepared_columns: Sequence[str],
-    mapped_rows: Sequence[Mapping[str, str]],
+    mapped: pd.DataFrame,
     *,
     project_root: Path = PROJECT_ROOT,
 ) -> dict[str, dict]:
     """Save and read back four model CSVs and the encounter-level split manifest."""
-    assignments = make_split_assignments(
-        mapped_rows, config_path=project_root / SPLIT_CONFIG_PATH.relative_to(PROJECT_ROOT),
-    )
+    ordered = _assigned_cohort(mapped, project_root)
     mapping = load_target_mapping(project_root / TARGET_MAPPING_CONFIG_PATH.relative_to(PROJECT_ROOT))
-    encounter_column, patient_column = ID_COLUMNS
-    partitions: dict[str, list[Mapping[str, str]]] = {name: [] for name in SPLIT_NAMES}
-    manifest_rows = []
-    ordered = sorted(mapped_rows, key=lambda row: (int(row[encounter_column]), row[encounter_column]))
-    for row in ordered:
-        encounter, patient = row[encounter_column], row[patient_column]
-        if row.get(CLASS_COLUMN) != mapping[row[TARGET_COLUMN]]:
-            raise ValueError("Binary class disagrees with the original target mapping.")
-        split = assignments[encounter]
-        partitions[split].append(row)
-        manifest_rows.append({encounter_column: encounter, patient_column: patient, "split": split})
+    validate_required_columns(mapped.columns, (CLASS_COLUMN,))
+    expected_labels = map_readmission_labels(mapped[TARGET_COLUMN], mapping)
+    if not mapped[CLASS_COLUMN].eq(expected_labels).fillna(False).all():
+        raise ValueError("Binary class disagrees with the original target mapping.")
 
+    membership = ordered.loc[:, list(SPLIT_MANIFEST_COLUMNS)]
+    records = ordered.drop(columns="split")
+    partitions = {name: records.loc[membership["split"].eq(name)] for name in SPLIT_NAMES}
     validate_partitions(
-        ((row[encounter_column], row[patient_column]) for row in mapped_rows),
+        mapped.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None),
         {
-            name: [(row[encounter_column], row[patient_column]) for row in records]
-            for name, records in partitions.items()
+            name: partition.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
+            for name, partition in partitions.items()
         },
     )
-    for name, records in partitions.items():
-        if {row[TARGET_COLUMN] for row in records} != set(TARGET_LABELS):
+    for name, partition in partitions.items():
+        if set(partition[TARGET_COLUMN]) != set(TARGET_LABELS):
             raise ValueError(f"At least one original target label is missing from {name}.")
 
+    partitions["train_validation"] = pd.concat([partitions["train"], partitions["validation"]], ignore_index=True)
     files = {}
     summaries = {}
-    model_partitions = {}
-    model_columns = []
     processed_dir = project_root / PROCESSED_DIR.relative_to(PROJECT_ROOT)
-    for name, records in partitions.items():
-        model_columns, model_rows = build_model_dataset(prepared_columns, records)
-        model_partitions[name] = model_rows
-        files[processed_dir / f"{name}.csv"] = (model_columns, model_rows)
-        summaries[name] = _partition_statistics(records, model_columns, model_rows)
-
-    combined = model_partitions["train"] + model_partitions["validation"]
-    files[processed_dir / "train_validation.csv"] = (model_columns, combined)
-    summaries["train_validation"] = _partition_statistics(
-        partitions["train"] + partitions["validation"], model_columns, combined,
-    )
+    for name, partition in partitions.items():
+        model = build_model_dataset(partition)
+        files[processed_dir / f"{name}.csv"] = model
+        summaries[name] = _partition_statistics(partition, model)
 
     manifest_path = project_root / SPLIT_MANIFEST_PATH.relative_to(PROJECT_ROOT)
-    files[manifest_path] = (SPLIT_MANIFEST_COLUMNS, manifest_rows)
+    files[manifest_path] = membership
     # Check existing outputs first, then write new files with the membership manifest last.
     for path in sorted(files, key=lambda path: not path.exists()):
-        columns, records = files[path]
-        write_csv(path, columns, records)
-        _, reloaded = read_csv(path, expected_columns=columns)
-        if reloaded != records:
+        frame = files[path]
+        write_csv(path, frame)
+        reloaded = read_csv(path, expected_columns=list(frame.columns))
+        if not reloaded.equals(frame.reset_index(drop=True)):
             raise ValueError(f"CSV round trip changed partition data: {path}")
     return summaries
 
@@ -316,21 +324,21 @@ class ArffAttribute:
 
 def create_arff_schema(
     predictors: Sequence[str],
-    training_rows: Sequence[Mapping[str, str]],
+    training: pd.DataFrame,
     *,
     target: str,
     target_values: tuple[str, ...],
 ) -> tuple[ArffAttribute, ...]:
     """Fit predictor domains from the supplied rows and append the fixed target domain."""
     validate_schema((*predictors, target))
-    if not training_rows:
+    if training.empty:
         raise ValueError("ARFF schema requires at least one fitting row.")
     schema = []
     for name in predictors:
         if name in COUNT_COLUMNS:
             schema.append(ArffAttribute(name))
         else:
-            values = {row[name] for row in training_rows}.difference(ARFF_MISSING_VALUES)
+            values = set(training[name].unique()).difference(ARFF_MISSING_VALUES)
             if not values:
                 raise ValueError(f"{name!r} has no observed values for its nominal ARFF domain.")
             schema.append(ArffAttribute(name, tuple(sorted(values))))
@@ -359,7 +367,7 @@ def arff_header(relation: str, schema: Sequence[ArffAttribute]) -> str:
 def make_arff(
     relation: str,
     schema: Sequence[ArffAttribute],
-    rows: Sequence[Mapping[str, str]],
+    frame: pd.DataFrame,
     *,
     allow_unseen: bool = False,
 ) -> tuple[str, dict]:
@@ -377,12 +385,12 @@ def make_arff(
     original_missing: Counter[str] = Counter()
     unseen: Counter[str] = Counter()
     unseen_values: dict[str, Counter[str]] = {}
+    rows = frame.loc[:, columns].itertuples(index=False, name=None)
     with StringIO(newline="") as stream:
         stream.write(arff_header(relation, schema))
         for number, row in enumerate(rows, start=1):
             encoded = []
-            for name in columns:
-                value = row[name]
+            for name, value in zip(columns, row, strict=True):
                 if name == target and value not in domains[target]:
                     raise ValueError(f"Invalid ARFF target {value!r} in row {number}.")
                 if value in ARFF_MISSING_VALUES:
@@ -403,7 +411,7 @@ def make_arff(
             stream.write(",".join(encoded) + "\n")
         content = stream.getvalue()
     return content, {
-        "rows": len(rows),
+        "rows": len(frame),
         "attributes": len(columns),
         "source_missing_by_column": dict(original_missing),
         "unseen_nominal_to_arff_missing": dict(unseen),
@@ -446,7 +454,7 @@ def validate_arff(
     content: str,
     relation: str,
     schema: Sequence[ArffAttribute],
-    rows: Sequence[Mapping[str, str]],
+    frame: pd.DataFrame,
     *,
     allow_unseen: bool = False,
 ) -> None:
@@ -456,12 +464,12 @@ def validate_arff(
         raise ValueError("ARFF relation or ordered attribute schema differs.")
     domains = [None if attr.domain is None else set(attr.domain) for attr in schema]
     names = [attr.name for attr in schema]
+    rows = frame.loc[:, names].itertuples(index=False, name=None)
     with StringIO(content, newline="\n") as stream:
         stream.seek(len(header))
         for number, (line, row) in enumerate(zip(stream, rows, strict=True), start=1):
             expected = []
-            for name, domain in zip(names, domains, strict=True):
-                value = row[name]
+            for name, domain, value in zip(names, domains, row, strict=True):
                 if name == names[-1] and value not in domain:
                     raise ValueError(f"Invalid ARFF target in row {number}.")
                 if value in ARFF_MISSING_VALUES or (allow_unseen and domain is not None and value not in domain):
@@ -475,35 +483,28 @@ def validate_arff(
 
 
 def _verified_arff_source_splits(
-    project_root: Path, prepared_rows: list[dict[str, str]],
-) -> dict[str, list[dict[str, str]]]:
+    project_root: Path, prepared: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
     """Reconcile the saved membership manifest with the deterministic cohort split."""
-    assignments = make_split_assignments(
-        prepared_rows, config_path=project_root / SPLIT_CONFIG_PATH.relative_to(PROJECT_ROOT),
-    )
-    _, manifest = read_csv(
+    ordered = _assigned_cohort(prepared, project_root)
+    manifest = read_csv(
         project_root / SPLIT_MANIFEST_PATH.relative_to(PROJECT_ROOT),
         expected_columns=SPLIT_MANIFEST_COLUMNS,
     )
-    encounter, patient = ID_COLUMNS
-    partitions: dict[str, list[dict[str, str]]] = {name: [] for name in SPLIT_NAMES}
-    ordered = sorted(prepared_rows, key=lambda row: (int(row[encounter]), row[encounter]))
-    for row, membership in zip(ordered, manifest, strict=True):
-        split = assignments[row[encounter]]
-        if membership != {encounter: row[encounter], patient: row[patient], "split": split}:
-            raise ValueError("Split manifest differs from the saved cohort or deterministic assignments.")
-        partitions[split].append(row)
-    return partitions
+    if not manifest.equals(ordered.loc[:, list(SPLIT_MANIFEST_COLUMNS)]):
+        raise ValueError("Split manifest differs from the saved cohort or deterministic assignments.")
+    records = ordered.drop(columns="split")
+    return {name: records.loc[manifest["split"].eq(name)] for name in SPLIT_NAMES}
 
 
 def save_weka_datasets(*, project_root: Path = PROJECT_ROOT) -> dict:
     """Write six validated ARFF datasets and their per-file conversion audit."""
-    prepared_columns, prepared_rows = load_full_prepared(project_root=project_root)
-    predictors = prepared_columns[2:-1]
+    prepared = load_full_prepared(project_root=project_root)
+    predictors = list(prepared.columns[2:-1])
     if not set(COUNT_COLUMNS).issubset(predictors):
         raise ValueError("The prepared data must include all configured numeric predictors.")
-    partitions = _verified_arff_source_splits(project_root, prepared_rows)
-    partitions["train_validation"] = partitions["train"] + partitions["validation"]
+    partitions = _verified_arff_source_splits(project_root, prepared)
+    partitions["train_validation"] = pd.concat([partitions["train"], partitions["validation"]], ignore_index=True)
     model_columns = [*predictors, CLASS_COLUMN]
     mapping = load_target_mapping(project_root / TARGET_MAPPING_CONFIG_PATH.relative_to(PROJECT_ROOT))
     processed_dir = project_root / PROCESSED_DIR.relative_to(PROJECT_ROOT)
@@ -512,34 +513,37 @@ def save_weka_datasets(*, project_root: Path = PROJECT_ROOT) -> dict:
     artifacts = {}
     audit = {"datasets": {}}
 
-    full_schema = create_arff_schema(predictors, prepared_rows, target=TARGET_COLUMN, target_values=TARGET_LABELS)
-    content, summary = make_arff(FULL_ARFF_RELATION, full_schema, prepared_rows)
-    validate_arff(content, FULL_ARFF_RELATION, full_schema, prepared_rows)
+    full_schema = create_arff_schema(predictors, prepared, target=TARGET_COLUMN, target_values=TARGET_LABELS)
+    content, summary = make_arff(FULL_ARFF_RELATION, full_schema, prepared)
+    validate_arff(content, FULL_ARFF_RELATION, full_schema, prepared)
     artifacts[weka_dir / "full_prepared.arff"] = content
     audit["datasets"]["full_prepared"] = {**summary, "schema_source": "full_prepared"}
     fitted_schemas = {}
+    test_frame = None
 
     for name, schema_source in (
         ("train", "train"), ("validation", "train"), ("test", "train"),
         ("train_validation", "train_validation"), ("test_for_train_validation", "train_validation"),
     ):
-        csv_name = "test" if name == "test_for_train_validation" else name
-        _, rows = read_csv(processed_dir / f"{csv_name}.csv", expected_columns=model_columns)
-        for number, (source, exported) in enumerate(zip(partitions[csv_name], rows, strict=True), start=1):
-            if (
-                exported[CLASS_COLUMN] != mapping[source[TARGET_COLUMN]]
-                or any(exported[column] != source[column] for column in predictors)
-            ):
-                raise ValueError(f"{csv_name}.csv differs from the assigned cohort at row {number}.")
+        if name == "test_for_train_validation":
+            assert test_frame is not None
+            frame = test_frame
+        else:
+            frame = read_csv(processed_dir / f"{name}.csv", expected_columns=model_columns)
+            expected = build_model_dataset(map_binary_targets(partitions[name], mapping=mapping))
+            if not frame.equals(expected.reset_index(drop=True)):
+                raise ValueError(f"{name}.csv differs from the assigned cohort.")
+            if name == "test":
+                test_frame = frame
 
         if name == schema_source:
             fitted_schemas[name] = create_arff_schema(
-                predictors, rows, target=CLASS_COLUMN, target_values=CLASS_LABELS,
+                predictors, frame, target=CLASS_COLUMN, target_values=CLASS_LABELS,
             )
         schema = fitted_schemas[schema_source]
         allow_unseen = name != schema_source
-        content, summary = make_arff(MODEL_ARFF_RELATION, schema, rows, allow_unseen=allow_unseen)
-        validate_arff(content, MODEL_ARFF_RELATION, schema, rows, allow_unseen=allow_unseen)
+        content, summary = make_arff(MODEL_ARFF_RELATION, schema, frame, allow_unseen=allow_unseen)
+        validate_arff(content, MODEL_ARFF_RELATION, schema, frame, allow_unseen=allow_unseen)
         artifacts[weka_dir / f"{name}.arff"] = content
         audit["datasets"][name] = {**summary, "schema_source": schema_source}
 

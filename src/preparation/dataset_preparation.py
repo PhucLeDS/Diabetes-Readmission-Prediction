@@ -9,7 +9,7 @@ from platform import python_version
 
 import pandas as pd
 
-from src.io_utils import CsvValue, read_csv_frame, read_json, sha256_file, write_csv_frame, write_json
+from src.io_utils import read_csv, read_json, sha256_file, write_csv, write_json
 from src.paths import (
     CONFIG_DIR, IDS_MAPPING_PATH, INTERIM_DIR, PREPARATION_OUTPUT_DIR,
     PROCESSED_DIR, PROJECT_ROOT, RAW_DATA_PATH,
@@ -133,8 +133,8 @@ def save_cohort_result(
     audit_path: Path = COHORT_AUDIT_PATH,
 ) -> tuple[Path, Path]:
     """Write the ordered cohort and its aggregate CSV audit."""
-    write_csv_frame(cohort_path, result.frame)
-    write_csv_frame(audit_path, result.audit)
+    write_csv(cohort_path, result.frame)
+    write_csv(audit_path, result.audit)
     return cohort_path, audit_path
 
 
@@ -265,7 +265,7 @@ def _feature_audit(
     row_count = len(grouped.frame)
     positions = {column: index for index, column in enumerate(columns, start=1)}
     empty = grouped.frame.eq("").sum()
-    audit: list[dict[str, CsvValue]] = []
+    audit: list[dict[str, str | int | float | None]] = []
 
     def add(
         column: str, action: str, logical_type: str, reason: str, *,
@@ -320,7 +320,7 @@ def save_feature_audit(
     result: FeatureSelectionResult, *, audit_path: Path = FEATURE_AUDIT_PATH,
 ) -> Path:
     """Write the column decisions, positions, and missingness for this selection."""
-    return write_csv_frame(audit_path, result.audit)
+    return write_csv(audit_path, result.audit)
 
 
 FULL_PREPARED_PATH = PROCESSED_DIR / "full_prepared.csv"
@@ -400,8 +400,8 @@ def save_full_prepared(
     artifact_keys = [path.relative_to(PROJECT_ROOT).as_posix() for path in artifact_paths]
     artifact_hashes = {key: sha256_file(project_root / key) for key in artifact_keys}
     full_key = FULL_PREPARED_PATH.relative_to(PROJECT_ROOT).as_posix()
-    csv_path = write_csv_frame(project_root / full_key, selected.frame)
-    reloaded = read_csv_frame(csv_path, expected_columns=list(selected.frame.columns))
+    csv_path = write_csv(project_root / full_key, selected.frame)
+    reloaded = read_csv(csv_path, expected_columns=list(selected.frame.columns))
     if not reloaded.equals(selected.frame.reset_index(drop=True)):
         raise ValueError(f"CSV round trip changed prepared records: {csv_path}")
     artifact_hashes[full_key] = sha256_file(csv_path)
