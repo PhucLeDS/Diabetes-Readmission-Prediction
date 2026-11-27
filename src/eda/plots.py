@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.eda.data import ADMISSION_COLUMNS
 from src.eda.descriptive import PRIOR_VISIT_COLUMNS
+from src.eda.information_coverage import LAB_RECORDING_PATTERNS, InformationCoverage
 from src.eda.nominal import DEMOGRAPHIC_COLUMNS, MEDICATION_FLAG_COLUMNS, NominalProfile
 from src.eda.relationships import STAY_COLUMN, STAY_SERVICE_COLUMNS, RelationshipProfile
 from src.preparation.dataset_preparation import DIAGNOSIS_GROUP_COLUMNS
@@ -180,6 +181,73 @@ def plot_nominal_distributions(profile: NominalProfile) -> dict[str, Figure]:
         "diagnosis_group_distributions": diagnoses,
     }
 
+
+
+def _plot_recording_patterns(
+    table: pd.DataFrame, *, group: str, labels: dict[str, str], title: str, cohort_size: int,
+) -> Figure:
+    observed = table.loc[table["group_patients"].gt(0)]
+    denominators = observed.drop_duplicates(group).set_index(group)["group_patients"]
+    proportions = observed.pivot(index=group, columns="lab_recording_pattern", values="percent_of_group")
+    proportions = proportions.reindex(index=denominators.index, columns=LAB_RECORDING_PATTERNS)
+    styles = {
+        "neither": ("Neither result", "#a5acb4"),
+        "a1c_only": ("HbA1c only", BAR_COLOR),
+        "glucose_only": ("Glucose only", "#c88424"),
+        "both": ("Both results", "#308475"),
+        "unknown": ("Unknown", "#815e8a"),
+    }
+    positions = np.arange(len(denominators))
+    figure, ax = plt.subplots(
+        figsize=(11, max(3.5, 2 + 0.43 * len(denominators))), layout="constrained",
+    )
+    figure.suptitle(f"{title} | Full prepared cohort (N = {cohort_size:,})")
+    left = np.zeros(len(positions))
+    for pattern, (label, color) in styles.items():
+        widths = proportions[pattern].to_numpy(dtype=float)
+        if widths.any():
+            ax.barh(positions, widths, left=left, label=label, color=color)
+            left += widths
+    ax.set_yticks(positions, labels=[
+        f"{labels.get(value, value)} (n = {count:,})" for value, count in denominators.items()
+    ])
+    ax.invert_yaxis()
+    ax.set(xlabel="Patients in group (%)", xlim=(0, 100))
+    figure.legend(loc="outside lower center", ncols=5, frameon=False)
+    return figure
+
+
+def plot_information_coverage(
+    profile: InformationCoverage, admission_descriptions: pd.DataFrame,
+) -> dict[str, Figure]:
+    """Plot subgroup shares from the same tables used for the EDA export."""
+    history = profile.lab_recording_by_prior_history
+    cohort_size = int(history["patients"].sum())
+    types = profile.lab_recording_by_characteristic.loc[
+        profile.lab_recording_by_characteristic["characteristic"].eq("admission_type_id")
+    ]
+    lookup = admission_descriptions.loc[admission_descriptions["column"].eq("admission_type_id")]
+    type_labels = {
+        row.code: shorten(f"{row.code} | {row.description or row.lookup_status}", width=42, placeholder="...")
+        for row in lookup.itertuples(index=False)
+    }
+    type_labels[""] = "(Empty field)"
+    with plt.rc_context({"axes.spines.top": False, "axes.spines.right": False}):
+        by_history = _plot_recording_patterns(
+            history, group="prior_history", labels={
+                "no_recorded_prior_visits": "Zero recorded visits",
+                "any_recorded_prior_visit": "At least one recorded visit",
+                "unknown": "Unknown history",
+            }, title="Laboratory Recording by Prior Service Use", cohort_size=cohort_size,
+        )
+        by_admission = _plot_recording_patterns(
+            types, group="value", labels=type_labels,
+            title="Laboratory Recording by Admission Type", cohort_size=cohort_size,
+        )
+    return {
+        "lab_recording_by_prior_history": by_history,
+        "lab_recording_by_admission_type": by_admission,
+    }
 
 
 def plot_relationships(profile: RelationshipProfile) -> dict[str, Figure]:

@@ -17,6 +17,7 @@ from src.eda.cohort_selection import MINIMUM_GROUP_SIZE, profile_cohort_selectio
 from src.eda.data import load_eda_inputs
 from src.eda.descriptive import QUANTILES, profile_completeness, profile_numeric
 from src.eda.findings import summarize_findings
+from src.eda.information_coverage import profile_information_coverage
 from src.eda.nominal import RARE_LEVEL_PERCENT, profile_nominal
 from src.eda.relationships import profile_relationships
 from src.io_utils import input_checksums, write_artifacts
@@ -76,8 +77,16 @@ def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, 
                 "eligible_encounters_per_patient": "patients with at least one eligible encounter",
                 "representative_encounter_profile": "encounters in the selection group among patients with multiple eligible encounters",
                 "discharge_patient_overlap": "unique patients in the cleaned encounters",
+                "lab_recording_by_prior_history": "patients in the prior history group",
+                "lab_recording_by_characteristic": "patients at the reported characteristic level",
             },
             "selection_small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
+            "information_coverage": {
+                "small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
+                "unknown_prior_history": "at least one prior visit count is missing",
+                "unknown_lab_recording": "either laboratory value is empty or outside its source domain",
+                "zero_denominator_percent": "empty CSV field",
+            },
             "rare_level_percent_exclusive": RARE_LEVEL_PERCENT,
             "empty_csv_fields_are_missing": True,
             "retained_source_categories": ["None", "Missing", "Unmapped"],
@@ -95,12 +104,15 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
 
-    from src.eda.plots import plot_nominal_distributions, plot_numeric_distributions, plot_relationships
+    from src.eda.plots import (
+        plot_information_coverage, plot_nominal_distributions, plot_numeric_distributions, plot_relationships,
+    )
 
     inputs = input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS)
     eda = load_eda_inputs()
     selection = profile_cohort_selection(eda)
     completeness = profile_completeness(eda.cohort, eda.admission_descriptions)
+    coverage = profile_information_coverage(eda.cohort)
     numeric = profile_numeric(eda.cohort)
     nominal = profile_nominal(eda)
     relationships = profile_relationships(eda.cohort)
@@ -112,7 +124,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
         "admission_lookup": eda.admission_descriptions,
         "eda_findings": findings,
     }
-    for profile in (selection, completeness, numeric, nominal, relationships):
+    for profile in (selection, completeness, coverage, numeric, nominal, relationships):
         for field in fields(profile):
             value = getattr(profile, field.name)
             if isinstance(value, pd.DataFrame):
@@ -125,6 +137,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
     with matplotlib.rc_context(matplotlib.rcParamsDefault):
         figures = {
             **plot_numeric_distributions(numeric.numeric_frequency, cohort_size=len(eda.cohort)),
+            **plot_information_coverage(coverage, eda.admission_descriptions),
             **plot_nominal_distributions(nominal),
             **plot_relationships(relationships),
         }

@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.eda.data import _admission_descriptions, _load_source_cohort
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
+from src.eda.information_coverage import profile_information_coverage
 from src.io_utils import read_csv, read_json, sha256_file, write_csv
 from src.paths import PROJECT_ROOT
 from src.preparation.data_loading import ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
@@ -50,6 +51,33 @@ class CohortInputTests(TestCase):
                 _load_source_cohort(root, manifest, prepared)
 
 
+class InformationCoverageTests(TestCase):
+    def test_missing_counts_and_invalid_laboratory_fields_remain_unknown(self) -> None:
+        cohort = pd.DataFrame({
+            "number_outpatient": pd.array([0, 1, 1, 0, 0, 0], dtype="Int64"),
+            "number_emergency": pd.array([0, 0, pd.NA, 0, 0, 0], dtype="Int64"),
+            "number_inpatient": pd.array([0, 0, 1, 0, 0, 0], dtype="Int64"),
+            "A1Cresult": ["None", "Norm", "None", "", "Unexpected", "None"],
+            "max_glu_serum": ["None", "None", ">200", "None", "Norm", pd.NA],
+            "age": ["[20-30)"] * 6,
+            "admission_type_id": ["1"] * 6,
+            "admission_source_id": ["7"] * 6,
+            "time_in_hospital": pd.array([1, 1, 1, 1, 1, 1], dtype="Int64"),
+        })
+        coverage = profile_information_coverage(cohort)
+        history = coverage.lab_recording_by_prior_history.set_index(["prior_history", "lab_recording_pattern"])
+        self.assertEqual(history.loc[history["patients"].gt(0), "patients"].to_dict(), {
+            ("no_recorded_prior_visits", "neither"): 1,
+            ("no_recorded_prior_visits", "unknown"): 3,
+            ("any_recorded_prior_visit", "a1c_only"): 1,
+            ("unknown", "glucose_only"): 1,
+        })
+        rows = coverage.lab_recording_by_characteristic
+        by_stay = rows.loc[rows["characteristic"].eq("time_in_hospital")].set_index("lab_recording_pattern")
+        self.assertEqual(by_stay.at["unknown", "patients"], 3)
+        self.assertEqual(by_stay.at["unknown", "percent_of_group"], 50)
+
+
 class EdaExportTests(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -80,7 +108,7 @@ class EdaExportTests(TestCase):
         }
         files.pop(MANIFEST_PATH.as_posix())
         self.assertEqual(files, manifest["artifact_sha256"])
-        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 28, ".png": 10})
+        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 30, ".png": 12})
         for relative in files:
             if relative.endswith(".csv"):
                 columns = read_csv(self.output_dir / relative).columns
@@ -142,3 +170,41 @@ class EdaExportTests(TestCase):
             "eligible_only": 69_119, "eligible_and_excluded": 871, "excluded_only": 1_528,
         })
         self.assertEqual(overlap["patients"].astype(int).sum(), 71_518)
+
+    def test_information_coverage_reconciles_with_overall_recording_patterns(self) -> None:
+        history = read_csv(self.output_dir / TABLE_DIR / "lab_recording_by_prior_history.csv")
+        characteristics = read_csv(self.output_dir / TABLE_DIR / "lab_recording_by_characteristic.csv")
+        patterns = read_csv(self.output_dir / TABLE_DIR / "lab_recording_patterns.csv")
+        status = {
+            ("False", "False"): "neither", ("True", "False"): "a1c_only",
+            ("False", "True"): "glucose_only", ("True", "True"): "both",
+        }
+        expected = {
+            status[(row.a1c_result_recorded, row.glucose_result_recorded)]: int(row.patients)
+            for row in patterns.itertuples(index=False)
+        }
+        expected["unknown"] = 0
+        self.assertEqual(sum(expected.values()), 69_990)
+        self.assertEqual(history.groupby("lab_recording_pattern")["patients"].agg(
+            lambda counts: counts.astype(int).sum(),
+        ).to_dict(), expected)
+        self.assertEqual(set(characteristics["characteristic"]), {
+            "age", "admission_type_id", "admission_source_id", "time_in_hospital",
+        })
+        for _, rows in characteristics.groupby("characteristic"):
+            totals = rows.assign(patients=rows["patients"].astype(int)).groupby("lab_recording_pattern")["patients"]
+            self.assertEqual(totals.sum().to_dict(), expected)
+
+        combined = history.set_index(["prior_history", "lab_recording_pattern"])
+        self.assertEqual(int(combined.at[("no_recorded_prior_visits", "neither"), "patients"]), 39_726)
+        for frame, keys in ((history, "prior_history"), (characteristics, ["characteristic", "value"])):
+            for _, rows in frame.groupby(keys):
+                counts = rows["patients"].astype(int)
+                denominator = counts.sum()
+                self.assertEqual(set(rows["group_patients"].astype(int)), {denominator})
+                self.assertEqual(rows["small_cell"].eq("True").tolist(), counts.lt(30).tolist())
+                if denominator:
+                    for count, percent in zip(counts, rows["percent_of_group"].astype(float), strict=True):
+                        self.assertAlmostEqual(percent, 100 * count / denominator)
+                else:
+                    self.assertTrue(rows["percent_of_group"].eq("").all())
