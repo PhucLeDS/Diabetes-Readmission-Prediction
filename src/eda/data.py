@@ -19,7 +19,7 @@ from src.preparation.dataset_preparation import (
     PREPARATION_MANIFEST_PATH,
     UNCLEAR_DISCHARGE_DESCRIPTIONS,
 )
-from src.validation import validate_partitions
+from src.validation import validate_partitions, validate_unique_ids
 
 ADMISSION_COLUMNS = ("admission_type_id", "admission_source_id")
 MEDICATION_COLUMNS = (
@@ -154,10 +154,11 @@ def _read_preparation_artifact(
 
 
 def align_source_cohort(cohort: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
-    """Verify complete encounter-patient membership and align the source to the cohort."""
+    """Align matching source encounters to a cohort with one encounter per patient."""
     cohort_keys = cohort.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
     source_keys = source.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
     validate_partitions(cohort_keys, {"source cohort": source_keys})
+    validate_unique_ids(cohort["patient_nbr"], name="cohort patient_nbr")
     return source.set_index("encounter_id", drop=False).loc[cohort["encounter_id"]].set_axis(cohort.index)
 
 

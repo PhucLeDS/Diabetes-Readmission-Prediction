@@ -73,6 +73,12 @@ class CohortInputTests(TestCase):
             with self.subTest(case=case), self.assertRaises(ValueError):
                 align_source_cohort(cohort, invalid)
 
+    def test_rejects_two_encounters_for_the_same_patient(self) -> None:
+        cohort = pd.DataFrame({"encounter_id": ["001", "002"], "patient_nbr": ["101", "101"]})
+        source = cohort.iloc[::-1].reset_index(drop=True)
+        with self.assertRaisesRegex(ValueError, "Duplicate cohort patient_nbr"):
+            align_source_cohort(cohort, source)
+
 
 class InformationCoverageTests(TestCase):
     def test_missing_counts_and_invalid_laboratory_fields_remain_unknown(self) -> None:
