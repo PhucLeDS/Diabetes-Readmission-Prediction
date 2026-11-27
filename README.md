@@ -70,7 +70,7 @@ Both Test ARFFs represent the same held-out encounters. The exporter uses `?` fo
 
 ## Exploratory Data Analysis
 
-The [EDA notebook](notebooks/03_eda.ipynb) describes the full cohort of 69,990 patients, including all 8 numeric predictors, 24 nominal predictors, and the Any Readmission outcome distribution. The prepared data contains 1,922 empty fields across 1,920 patients. A separate laboratory summary shows that 54,041 patients have neither test result recorded. The [EDA Report](reports/02_eda.md) explains the denominators, evidence, and limits of these summaries.
+The [EDA notebook](notebooks/03_eda.ipynb) describes the full cohort of **69,990 patients**, including all 8 numeric predictors, 24 nominal predictors, cohort selection, diagnosis coverage, medication records, and the Any Readmission outcome distribution. It summarizes **18 findings** and four directions for an integrated readmission analysis. The [EDA Report](reports/02_eda.md) explains their evidence, denominators, and limits.
 
 EDA uses the entire prepared cohort, including patients assigned to Test. Record any influence of full-cohort exploration on later modeling decisions when interpreting the final evaluation.
 
@@ -144,13 +144,13 @@ This command executes the notebooks without saving cell outputs to their source 
 
 ### Explore the Prepared Cohort
 
-After generating `full_prepared.csv` and the preparation audits, open [03_eda.ipynb](notebooks/03_eda.ipynb), select the **Python (Diabetes Readmission)** kernel, and run every cell. From the repository root with the project environment active, generate the local tables, figures, and manifest:
+After running the data-loading and preparation notebooks, open [03_eda.ipynb](notebooks/03_eda.ipynb), select the **Python (Diabetes Readmission)** kernel, and run every cell. The EDA reads the prepared cohort, cleaned and selected source encounters, admission lookup, configuration, and preparation audit. From the repository root with the project environment active, generate the local tables, figures, and manifest:
 
 ```bash
 python -m src.eda.export
 ```
 
-Use `--output-dir` to export to a separate location. The exporter reuses identical existing files and stops if an existing artifact differs. Use `--overwrite` to replace differing local EDA artifacts after reviewing the change. Generated EDA tables and figures are ignored by Git and can be recreated with this command.
+The command creates **42 CSV tables, 14 PNG figures, and one manifest**, including `eda_findings.csv` and `eda_analysis_directions.csv`. Use `--output-dir` to export to a separate location. The exporter reuses identical existing files and stops if an existing artifact differs. Use `--overwrite` to replace differing local EDA artifacts after reviewing the change. Generated EDA tables and figures are ignored by Git and can be recreated with this command.
 
 ### Analyze Readmission
 
@@ -174,9 +174,9 @@ Run the suite from the repository root with the project environment active.
 python -m unittest discover -s tests -v
 ```
 
-After the pandas refactor, all **85 tests** passed, comprising 67 Preparation tests, 3 EDA tests, and 15 Analysis tests. They cover source integrity, attribute order, partition membership, CSV and ARFF values, checksums, reconciliation across tables, and output protection. Integration tests require the corresponding input data. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation) · [EDA validation](reports/02_eda.md#9-reproduction-and-validation) · [Analysis validation](reports/03_analysis.md#8-reproduction-and-validation)
+The tests cover source integrity, attribute order, partition membership, CSV and ARFF values, checksums, reconciliation across tables, and output protection. Integration tests require the corresponding input data. The extended EDA passed **17 tests**, and an independent export matched the 56 locally generated tables and figures. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation) · [EDA validation](reports/02_eda.md#9-reproduction-and-validation) · [Analysis validation](reports/03_analysis.md#8-reproduction-and-validation)
 
-Two independent runs executed all five notebooks in fresh kernels and exported the EDA and Analysis artifacts. Each run reproduced **19 Preparation files, 35 EDA files, and 16 Analysis files** byte for byte against the pre-refactor baseline and the other run. Both raw files retained their approved checksums. Weka **3.9.7** loaded all six ARFF files and verified compatible headers for each training stage. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation)
+At the pandas refactor, two independent runs executed all five notebooks in fresh kernels and reproduced **19 Preparation files, 35 then-current EDA files, and 16 Analysis files** byte for byte against the pre-refactor baseline and each other. EDA was subsequently expanded to 56 tables and figures plus a manifest. Both raw files retained their approved checksums during the refactor validation. Weka **3.9.7** loaded all six ARFF files and verified compatible headers for each training stage. [Data Preparation validation](reports/01_data_preparation.md#10-final-validation)
 
 ## Limitations
 
