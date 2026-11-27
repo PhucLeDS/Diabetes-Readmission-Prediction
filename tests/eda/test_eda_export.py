@@ -11,10 +11,11 @@ from unittest.mock import patch
 import pandas as pd
 
 from src.eda.admission_context import profile_admission_context
-from src.eda.data import _admission_descriptions, _load_source_cohort
+from src.eda.data import MEDICATION_COLUMNS, _admission_descriptions, _load_source_cohort
 from src.eda.diagnosis_detail import profile_diagnosis_detail
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
 from src.eda.information_coverage import profile_information_coverage
+from src.eda.medication_detail import EXCLUDED_MEDICATION_COLUMNS, profile_medication_detail
 from src.eda.nominal import _diagnosis_summaries
 from src.io_utils import read_csv, read_json, sha256_file, write_csv
 from src.paths import PROJECT_ROOT
@@ -159,6 +160,48 @@ class DiagnosisDetailTests(TestCase):
             profile_diagnosis_detail(self.cohort, wrong_code, self.summary)
 
 
+class MedicationDetailTests(TestCase):
+    def test_counts_pairs_and_unknown_statuses(self) -> None:
+        identifiers = {
+            "encounter_id": ["001", "002", "003", "004", "005"],
+            "patient_nbr": ["101", "102", "103", "104", "105"],
+        }
+        cohort = pd.DataFrame({
+            **identifiers,
+            **dict.fromkeys(MEDICATION_COLUMNS, "No"),
+            "insulin": ["Steady", "No", "No", pd.NA, "Up"],
+            "metformin": ["Up", "No", "No", "No", "Steady"],
+            "glipizide": ["Steady", "No", "No", "", pd.NA],
+            "diabetesMed": "Yes",
+            "change": "Ch",
+        })
+        source = pd.DataFrame({
+            **identifiers,
+            **dict.fromkeys(EXCLUDED_MEDICATION_COLUMNS, "No"),
+            "miglitol": ["No", "Up", "No", "No", "No"],
+            "tolazamide": ["No", pd.NA, "Unexpected", "No", "No"],
+        }).iloc[::-1]
+        result = profile_medication_detail(cohort, source)
+        distribution = result.medication_count_distribution.set_index(["measure", "medications"])
+        self.assertEqual(distribution.at[("recorded_status", 0), "patients"], 3)
+        self.assertEqual(distribution.at[("recorded_status", 3), "patients"], 1)
+        self.assertEqual(distribution.at[("up_or_down", 1), "patients"], 2)
+        self.assertEqual(distribution.at[("recorded_status", 0), "patients_with_unknown_retained_status"], 1)
+        pairs = result.insulin_medication_pairs.set_index("medication")
+        self.assertEqual(pairs.at["metformin", "pair_patients"], 2)
+        self.assertEqual(pairs.at["glipizide", "pair_patients"], 1)
+        self.assertEqual(pairs.at["glipizide", "insulin_patients_with_unknown_medication_status"], 1)
+
+        reconciliation = result.medication_flag_reconciliation.set_index(["source_flag", "excluded_status"])
+        for flag in ("diabetesMed", "change"):
+            self.assertEqual(reconciliation.loc[flag, "patients"].to_dict(), {
+                "matching_status_recorded": 1, "no_matching_status_recorded": 1, "unknown": 1,
+            })
+            self.assertEqual(reconciliation.at[(flag, "matching_status_recorded"), "matching_excluded_columns"], "miglitol")
+            self.assertEqual(reconciliation.at[(flag, "no_matching_status_recorded"),
+                                                "patients_with_unknown_retained_status"], 1)
+
+
 class EdaExportTests(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -189,7 +232,7 @@ class EdaExportTests(TestCase):
         }
         files.pop(MANIFEST_PATH.as_posix())
         self.assertEqual(files, manifest["artifact_sha256"])
-        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 38, ".png": 14})
+        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 41, ".png": 14})
         for relative in files:
             if relative.endswith(".csv"):
                 columns = read_csv(self.output_dir / relative).columns
@@ -348,3 +391,39 @@ class EdaExportTests(TestCase):
             self.assertEqual(row.patients_at_any_position, expected["patients_at_any_position"])
             self.assertEqual(int(row.additional_patients),
                              int(row.patients_at_any_position) - int(row.patients_at_primary_position))
+
+    def test_medication_tables_reconcile_with_source_flags_and_retained_statuses(self) -> None:
+        def read_table(name: str) -> pd.DataFrame:
+            return read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")
+
+        flags = read_table("medication_flags")
+        reconciliation = read_table("medication_flag_reconciliation")
+        for flag, level, expected, matching in (("diabetesMed", "Yes", 34, 34), ("change", "Ch", 14_247, 1)):
+            legacy = flags.loc[flags["source_flag"].eq(flag) & flags["flag_value"].eq(level)]
+            legacy_zero = legacy.loc[legacy["retained_status"].eq("0"), "patients"]
+            self.assertEqual(legacy_zero.astype(int).sum(), expected)
+            rows = reconciliation.loc[reconciliation["source_flag"].eq(flag)]
+            self.assertEqual(set(rows["flag_group_patients"].astype(int)), {legacy["patients"].astype(int).sum()})
+            self.assertEqual(set(rows["comparison_patients"].astype(int)), {expected})
+            self.assertEqual(rows["patients"].astype(int).sum(), expected)
+            self.assertEqual(int(rows.set_index("excluded_status").at["matching_status_recorded", "patients"]), matching)
+
+        nominal = read_table("medication_status").set_index("column")
+        distribution = read_table("medication_count_distribution")
+        expected_totals = {
+            "recorded_status": nominal[["steady_patients", "up_patients", "down_patients"]].astype(int).to_numpy().sum(),
+            "up_or_down": nominal[["up_patients", "down_patients"]].astype(int).to_numpy().sum(),
+        }
+        for measure, rows in distribution.groupby("measure"):
+            patients = rows["patients"].astype(int)
+            self.assertEqual(patients.sum(), 69_990)
+            self.assertEqual((patients * rows["medications"].astype(int)).sum(), expected_totals[measure])
+
+        pairs = read_table("insulin_medication_pairs").set_index("medication")
+        insulin_patients = int(nominal.at["insulin", "any_non_no_patients"])
+        self.assertEqual(set(pairs["insulin_patients"].astype(int)), {insulin_patients})
+        self.assertEqual(len(pairs), 11)
+        for count, percent in zip(
+            pairs["pair_patients"].astype(int), pairs["percent_of_insulin_patients"].astype(float), strict=True,
+        ):
+            self.assertAlmostEqual(percent, 100 * count / insulin_patients)
