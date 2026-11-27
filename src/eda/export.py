@@ -13,6 +13,7 @@ from matplotlib import ft2font
 import numpy as np
 import pandas as pd
 
+from src.eda.cohort_selection import MINIMUM_GROUP_SIZE, profile_cohort_selection
 from src.eda.data import load_eda_inputs
 from src.eda.descriptive import QUANTILES, profile_completeness, profile_numeric
 from src.eda.findings import summarize_findings
@@ -20,9 +21,10 @@ from src.eda.nominal import RARE_LEVEL_PERCENT, profile_nominal
 from src.eda.relationships import profile_relationships
 from src.io_utils import input_checksums, write_artifacts
 from src.paths import IDS_MAPPING_PATH, OUTPUT_DIR, PROJECT_ROOT
+from src.preparation.data_cleaning import CLEANED_DATA_PATH
 from src.preparation.dataset_export import TARGET_MAPPING_CONFIG_PATH
 from src.preparation.dataset_preparation import (
-    FEATURE_AUDIT_PATH, FULL_PREPARED_PATH, PREPARATION_CONFIG_PATH, PREPARATION_MANIFEST_PATH,
+    COHORT_DATA_PATH, FEATURE_AUDIT_PATH, FULL_PREPARED_PATH, PREPARATION_CONFIG_PATH, PREPARATION_MANIFEST_PATH,
 )
 
 
@@ -32,6 +34,8 @@ MANIFEST_PATH = TABLE_DIR / "eda_manifest.json"
 FIGURE_DPI = 150
 INPUT_PATHS = {
     "prepared_cohort": FULL_PREPARED_PATH,
+    "cleaned_encounters": CLEANED_DATA_PATH,
+    "source_cohort": COHORT_DATA_PATH,
     "preparation_manifest": PREPARATION_MANIFEST_PATH,
     "preparation_config": PREPARATION_CONFIG_PATH,
     "feature_audit": FEATURE_AUDIT_PATH,
@@ -68,7 +72,12 @@ def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, 
                 "laboratory_result_share": "patients with a result recorded for the corresponding test",
                 "age_prior_visit_share": "patients in the age band",
                 "medication_flag_share": "patients in the source flag group",
+                "discharge_eligibility_profile": "encounters in the eligibility group",
+                "eligible_encounters_per_patient": "patients with at least one eligible encounter",
+                "representative_encounter_profile": "encounters in the selection group among patients with multiple eligible encounters",
+                "discharge_patient_overlap": "unique patients in the cleaned encounters",
             },
+            "selection_small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
             "rare_level_percent_exclusive": RARE_LEVEL_PERCENT,
             "empty_csv_fields_are_missing": True,
             "retained_source_categories": ["None", "Missing", "Unmapped"],
@@ -90,6 +99,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
 
     inputs = input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS)
     eda = load_eda_inputs()
+    selection = profile_cohort_selection(eda)
     completeness = profile_completeness(eda.cohort, eda.admission_descriptions)
     numeric = profile_numeric(eda.cohort)
     nominal = profile_nominal(eda)
@@ -102,7 +112,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
         "admission_lookup": eda.admission_descriptions,
         "eda_findings": findings,
     }
-    for profile in (completeness, numeric, nominal, relationships):
+    for profile in (selection, completeness, numeric, nominal, relationships):
         for field in fields(profile):
             value = getattr(profile, field.name)
             if isinstance(value, pd.DataFrame):

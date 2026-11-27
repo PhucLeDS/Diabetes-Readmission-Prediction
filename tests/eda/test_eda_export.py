@@ -10,11 +10,12 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from src.eda.data import _admission_descriptions
+from src.eda.data import _admission_descriptions, _load_source_cohort
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
-from src.io_utils import read_csv, read_json, sha256_file
+from src.io_utils import read_csv, read_json, sha256_file, write_csv
 from src.paths import PROJECT_ROOT
-from src.preparation.data_loading import MAPPING_COLUMNS, RawTable
+from src.preparation.data_loading import ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
+from src.preparation.dataset_preparation import COHORT_DATA_PATH
 
 
 class AdmissionLookupTests(TestCase):
@@ -32,6 +33,21 @@ class AdmissionLookupTests(TestCase):
         self.assertEqual(lookup.loc[("admission_type_id", "99"), "description"], "")
         self.assertEqual(lookup.loc[("admission_type_id", "99"), "lookup_status"], "Unmapped code")
         self.assertEqual(lookup.loc[("admission_source_id", "7"), "lookup_status"], "Mapped")
+
+
+class CohortInputTests(TestCase):
+    def test_rejects_wrong_patient_for_verified_encounter(self) -> None:
+        key = COHORT_DATA_PATH.relative_to(PROJECT_ROOT).as_posix()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = pd.DataFrame(
+                [{"encounter_id": "001", "patient_nbr": "101"}], columns=ENCOUNTER_COLUMNS, dtype="string",
+            ).fillna("")
+            path = write_csv(root / key, source)
+            manifest = {"artifact_sha256": {key: sha256_file(path)}}
+            prepared = pd.DataFrame({"encounter_id": ["001"], "patient_nbr": ["102"]})
+            with self.assertRaisesRegex(ValueError, "Patient ID differs"):
+                _load_source_cohort(root, manifest, prepared)
 
 
 class EdaExportTests(TestCase):
@@ -64,7 +80,7 @@ class EdaExportTests(TestCase):
         }
         files.pop(MANIFEST_PATH.as_posix())
         self.assertEqual(files, manifest["artifact_sha256"])
-        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 24, ".png": 10})
+        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 28, ".png": 10})
         for relative in files:
             if relative.endswith(".csv"):
                 columns = read_csv(self.output_dir / relative).columns
@@ -94,3 +110,35 @@ class EdaExportTests(TestCase):
         findings = {row["finding"]: row for row in table("eda_findings")}
         self.assertIn("28,511/69,990", findings["Any Readmission"]["evidence"])
         self.assertIn("54,041/69,990", findings["Laboratory coverage"]["evidence"])
+
+    def test_cohort_selection_counts_reconcile(self) -> None:
+        flow = read_csv(self.output_dir / TABLE_DIR / "cohort_flow.csv")
+        self.assertEqual(flow["encounters"].astype(int).tolist(), [101_766, 99_343, 69_990])
+
+        comparisons = (
+            ("discharge_eligibility_profile", {"eligible": 99_343, "excluded": 2_423}),
+            ("representative_encounter_profile", {"representative": 16_341, "other_eligible": 29_353}),
+        )
+        for name, expected in comparisons:
+            with self.subTest(table=name):
+                frame = read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")
+                actual = frame.groupby(["group", "attribute"])
+                self.assertEqual(set(frame["group"]), set(expected))
+                self.assertEqual(set(frame["attribute"]), {"age", "time_in_hospital", "admission_type_id"})
+                self.assertEqual(actual.ngroups, 6)
+                for (group, _), rows in actual:
+                    self.assertEqual(rows["encounters"].astype(int).sum(), expected[group])
+                    self.assertEqual(set(rows["group_encounters"].astype(int)), {expected[group]})
+                    self.assertAlmostEqual(rows["percent_of_group"].astype(float).sum(), 100)
+
+        distribution = read_csv(self.output_dir / TABLE_DIR / "eligible_encounters_per_patient.csv")
+        multiple = distribution.loc[distribution["eligible_encounters_per_patient"].astype(int).gt(1)]
+        self.assertEqual(distribution["patients"].astype(int).sum(), 69_990)
+        self.assertEqual(multiple["patients"].astype(int).sum(), 16_341)
+        self.assertEqual(multiple["eligible_encounters"].astype(int).sum(), 45_694)
+
+        overlap = read_csv(self.output_dir / TABLE_DIR / "discharge_patient_overlap.csv").set_index("group")
+        self.assertEqual(overlap["patients"].astype(int).to_dict(), {
+            "eligible_only": 69_119, "eligible_and_excluded": 871, "excluded_only": 1_528,
+        })
+        self.assertEqual(overlap["patients"].astype(int).sum(), 71_518)

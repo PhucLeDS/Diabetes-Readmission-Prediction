@@ -7,13 +7,19 @@ import pandas as pd
 
 from src.io_utils import read_csv, read_json, sha256_file
 from src.paths import IDS_MAPPING_PATH, PROJECT_ROOT
-from src.preparation.data_loading import COUNT_COLUMNS, ID_COLUMNS, TARGET_COLUMN, load_ids_mapping, parse_ids_mapping
+from src.preparation.data_cleaning import CLEANED_DATA_PATH
+from src.preparation.data_loading import (
+    COUNT_COLUMNS, ENCOUNTER_COLUMNS, ID_COLUMNS, TARGET_COLUMN, load_ids_mapping, parse_ids_mapping,
+)
 from src.preparation.dataset_export import load_full_prepared, parse_count_columns
 from src.preparation.dataset_preparation import (
+    COHORT_DATA_PATH,
     FEATURE_AUDIT_PATH,
+    PREPARATION_CONFIG_PATH,
     PREPARATION_MANIFEST_PATH,
     UNCLEAR_DISCHARGE_DESCRIPTIONS,
 )
+from src.validation import validate_partitions
 
 ADMISSION_COLUMNS = ("admission_type_id", "admission_source_id")
 MEDICATION_COLUMNS = (
@@ -72,9 +78,12 @@ COLUMN_DETAILS = {
 
 @dataclass
 class EdaInputs:
-    """The verified cohort and its context tables in prepared column order."""
+    """Verified data and context for profiling the cohort and its selection."""
 
     cohort: pd.DataFrame
+    cleaned_encounters: pd.DataFrame
+    source_cohort: pd.DataFrame
+    excluded_discharge_codes: tuple[str, ...]
     cohort_flow: pd.DataFrame
     column_dictionary: pd.DataFrame
     source_feature_decisions: pd.DataFrame
@@ -134,6 +143,26 @@ def _column_dictionary(schema: list[dict[str, str]]) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
+def _read_preparation_artifact(
+    path: Path, project_root: Path, manifest: dict, *, expected_columns: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    key = path.relative_to(PROJECT_ROOT).as_posix()
+    artifact = project_root / key
+    if sha256_file(artifact) != manifest["artifact_sha256"][key]:
+        raise ValueError(f"{key} differs from the preparation manifest.")
+    return read_csv(artifact, expected_columns=expected_columns)
+
+
+def _load_source_cohort(project_root: Path, manifest: dict, prepared: pd.DataFrame) -> pd.DataFrame:
+    source = _read_preparation_artifact(
+        COHORT_DATA_PATH, project_root, manifest, expected_columns=ENCOUNTER_COLUMNS,
+    )
+    prepared_keys = prepared.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
+    source_keys = source.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
+    validate_partitions(prepared_keys, {"source cohort": source_keys})
+    return source
+
+
 def load_eda_inputs(*, project_root: Path = PROJECT_ROOT) -> EdaInputs:
     """Load and describe the full cohort without writing any artifacts."""
     cohort = parse_count_columns(load_full_prepared(project_root=project_root))
@@ -147,11 +176,12 @@ def load_eda_inputs(*, project_root: Path = PROJECT_ROOT) -> EdaInputs:
     ) != (len(cohort), cohort[ID_COLUMNS[1]].nunique()):
         raise ValueError("The preparation manifest cohort flow differs from the prepared cohort.")
 
-    audit_key = FEATURE_AUDIT_PATH.relative_to(PROJECT_ROOT).as_posix()
-    audit_path = project_root / audit_key
-    if sha256_file(audit_path) != manifest["artifact_sha256"][audit_key]:
-        raise ValueError("The feature audit differs from the preparation manifest.")
-    audit = read_csv(audit_path)
+    source_cohort = _load_source_cohort(project_root, manifest, cohort)
+    cleaned = _read_preparation_artifact(
+        CLEANED_DATA_PATH, project_root, manifest, expected_columns=ENCOUNTER_COLUMNS,
+    )
+    config = read_json(project_root / PREPARATION_CONFIG_PATH.relative_to(PROJECT_ROOT))
+    audit = _read_preparation_artifact(FEATURE_AUDIT_PATH, project_root, manifest)
     decisions = audit.loc[
         audit["action"].isin(["drop_source", "replaced_diagnosis", "not_created"]),
         ["column", "action", "input_stage", "output_column", "reason"],
@@ -159,6 +189,9 @@ def load_eda_inputs(*, project_root: Path = PROJECT_ROOT) -> EdaInputs:
 
     return EdaInputs(
         cohort=cohort,
+        cleaned_encounters=parse_count_columns(cleaned),
+        source_cohort=source_cohort,
+        excluded_discharge_codes=tuple(config["cohort"]["excluded_discharge_codes"]),
         cohort_flow=cohort_flow,
         column_dictionary=_column_dictionary(manifest["schema"]),
         source_feature_decisions=decisions,
