@@ -250,6 +250,33 @@ def plot_information_coverage(
     }
 
 
+def plot_diagnosis_group_gain(table: pd.DataFrame) -> Figure:
+    """Compare the share of patients with each group at the first or any position."""
+    rows = table.sort_values("any_position_percent_of_cohort", ascending=False, kind="stable")
+    positions = np.arange(len(rows))
+    cohort_size = int(rows["cohort_size"].iloc[0])
+    with plt.rc_context({"axes.spines.top": False, "axes.spines.right": False}):
+        figure, ax = plt.subplots(figsize=(11, 6), layout="constrained")
+        figure.suptitle(f"Diagnosis Group Coverage | Full prepared cohort (N = {cohort_size:,})")
+        ax.barh(
+            positions - 0.18, rows["primary_percent_of_cohort"], height=0.32,
+            color="#8295a0", label="Primary position",
+        )
+        bars = ax.barh(
+            positions + 0.18, rows["any_position_percent_of_cohort"], height=0.32,
+            color=BAR_COLOR, label="Any position",
+        )
+        ax.bar_label(bars, fmt="%.1f%%", padding=4, fontsize=8)
+        ax.set_yticks(positions, labels=rows["group"])
+        ax.invert_yaxis()
+        ax.set(
+            xlabel="Patients in the full cohort (%)",
+            xlim=(0, max(float(rows["any_position_percent_of_cohort"].max()), 1) * 1.16),
+        )
+        ax.legend(loc="lower right")
+    return figure
+
+
 def plot_admission_type_source(table: pd.DataFrame) -> Figure:
     """Show the source shares within each admission type, with row denominators."""
     types = table.drop_duplicates("admission_type_code").set_index("admission_type_code")

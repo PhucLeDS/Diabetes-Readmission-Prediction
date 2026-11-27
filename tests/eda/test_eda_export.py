@@ -12,8 +12,10 @@ import pandas as pd
 
 from src.eda.admission_context import profile_admission_context
 from src.eda.data import _admission_descriptions, _load_source_cohort
+from src.eda.diagnosis_detail import profile_diagnosis_detail
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
 from src.eda.information_coverage import profile_information_coverage
+from src.eda.nominal import _diagnosis_summaries
 from src.io_utils import read_csv, read_json, sha256_file, write_csv
 from src.paths import PROJECT_ROOT
 from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
@@ -109,6 +111,54 @@ class AdmissionContextTests(TestCase):
         self.assertTrue(pd.isna(no_valid["median"]))
 
 
+class DiagnosisDetailTests(TestCase):
+    def setUp(self) -> None:
+        self.cohort = pd.DataFrame({
+            "encounter_id": ["001", "002", "003", "004"],
+            "patient_nbr": ["101", "102", "103", "104"],
+            "diag_1_group": ["Circulatory", "Other_V", "Missing", "Other_E"],
+            "diag_2_group": ["Circulatory", "Circulatory", "Unmapped", "Missing"],
+            "diag_3_group": ["Other_V", "Circulatory", "Missing", "Missing"],
+        })
+        self.source = pd.DataFrame({
+            "encounter_id": ["002", "001", "003", "004"],
+            "patient_nbr": ["102", "101", "103", "104"],
+            "diag_1": ["V45.81", "401.9", "", "E812.0"],
+            "diag_2": ["401", "401.9", "bad", ""],
+            "diag_3": ["401.9", "V45.81", "", ""],
+        })
+        self.summary, _ = _diagnosis_summaries(self.cohort)
+
+    def test_repeated_groups_pairs_and_source_codes_count_each_patient_once(self) -> None:
+        diagnoses = profile_diagnosis_detail(self.cohort, self.source, self.summary)
+        depth = diagnoses.diagnosis_position_depth.set_index([
+            "mapped_positions", "distinct_mapped_groups", "missing_positions", "unmapped_positions",
+        ])
+        self.assertEqual(depth.at[(3, 2, 0, 0), "patients"], 2)
+        self.assertEqual(depth.at[(0, 0, 2, 1), "patients"], 1)
+        self.assertEqual(diagnoses.diagnosis_group_pairs.set_index(["group_1", "group_2"])["patients"].to_dict(), {
+            ("Circulatory", "Other_V"): 2,
+        })
+        counts = diagnoses.diagnosis_source_code_detail.set_index(["group", "source_code"])
+        self.assertEqual(counts.at[("Circulatory", "401.9"), "patients"], 2)
+        self.assertEqual(counts.at[("Circulatory", "401"), "percent_of_group"], 50)
+        self.assertEqual(counts.at[("Other_E", "E812.0"), "patients"], 1)
+        self.assertEqual(counts.at[("Unmapped", "bad"), "patients"], 1)
+        self.assertNotIn("", counts.index.get_level_values("source_code"))
+
+    def test_rejects_mismatched_keys_or_group_assignments(self) -> None:
+        wrong_patient = self.source.copy()
+        wrong_patient.loc[0, "patient_nbr"] = "999"
+        with self.assertRaisesRegex(ValueError, "Patient IDs differ"):
+            profile_diagnosis_detail(self.cohort, wrong_patient, self.summary)
+        with self.assertRaisesRegex(ValueError, "encounter IDs differ"):
+            profile_diagnosis_detail(self.cohort, self.source.iloc[1:], self.summary)
+        wrong_code = self.source.copy()
+        wrong_code.loc[0, "diag_1"] = "401.9"
+        with self.assertRaisesRegex(ValueError, "disagrees with its prepared diagnosis group"):
+            profile_diagnosis_detail(self.cohort, wrong_code, self.summary)
+
+
 class EdaExportTests(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -139,7 +189,7 @@ class EdaExportTests(TestCase):
         }
         files.pop(MANIFEST_PATH.as_posix())
         self.assertEqual(files, manifest["artifact_sha256"])
-        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 33, ".png": 13})
+        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 38, ".png": 14})
         for relative in files:
             if relative.endswith(".csv"):
                 columns = read_csv(self.output_dir / relative).columns
@@ -271,3 +321,30 @@ class EdaExportTests(TestCase):
             self.assertEqual(set(rows["type_patients"].astype(int)), {rows["patients"].sum()})
             for count, share in zip(rows["patients"], rows["percent_of_admission_type"].astype(float), strict=True):
                 self.assertAlmostEqual(share, 100 * count / rows["patients"].sum())
+
+    def test_diagnosis_depth_reconciles_with_nominal_coverage(self) -> None:
+        depth = read_csv(self.output_dir / TABLE_DIR / "diagnosis_position_depth.csv").astype({
+            "mapped_positions": int, "distinct_mapped_groups": int, "patients": int,
+            "missing_positions": int, "unmapped_positions": int,
+        })
+        complete = depth.loc[depth["mapped_positions"].eq(3)].set_index("distinct_mapped_groups")
+        self.assertEqual(complete["patients"].to_dict(), {1: 7_360, 2: 31_070, 3: 30_276})
+        coverage = read_csv(self.output_dir / TABLE_DIR / "diagnosis_coverage.csv")
+        nominal_coverage = coverage.set_index(coverage["positions_with_mapped_codes"].astype(int))
+        totals = depth.groupby("mapped_positions")["patients"].sum()
+        self.assertEqual(totals.reindex(nominal_coverage.index, fill_value=0).to_dict(),
+                         nominal_coverage["patients"].astype(int).to_dict())
+        nominal = read_csv(self.output_dir / TABLE_DIR / "diagnosis_summary.csv").set_index("group")
+        for status in ("Missing", "Unmapped"):
+            positions = [f"diag_{n}_group_patients" for n in (1, 2, 3)]
+            expected = nominal.loc[status, positions].astype(int).sum()
+            actual = (depth[f"{status.lower()}_positions"] * depth["patients"]).sum()
+            self.assertEqual(actual, expected)
+
+        gain = read_csv(self.output_dir / TABLE_DIR / "diagnosis_group_gain.csv").set_index("group")
+        for row in gain.itertuples():
+            expected = nominal.loc[row.Index]
+            self.assertEqual(row.patients_at_primary_position, expected["diag_1_group_patients"])
+            self.assertEqual(row.patients_at_any_position, expected["patients_at_any_position"])
+            self.assertEqual(int(row.additional_patients),
+                             int(row.patients_at_any_position) - int(row.patients_at_primary_position))

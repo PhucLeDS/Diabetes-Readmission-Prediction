@@ -17,6 +17,7 @@ from src.eda.admission_context import profile_admission_context
 from src.eda.cohort_selection import MINIMUM_GROUP_SIZE, profile_cohort_selection
 from src.eda.data import load_eda_inputs
 from src.eda.descriptive import QUANTILES, profile_completeness, profile_numeric
+from src.eda.diagnosis_detail import profile_diagnosis_detail
 from src.eda.findings import summarize_findings
 from src.eda.information_coverage import profile_information_coverage
 from src.eda.nominal import RARE_LEVEL_PERCENT, profile_nominal
@@ -26,7 +27,8 @@ from src.paths import IDS_MAPPING_PATH, OUTPUT_DIR, PROJECT_ROOT
 from src.preparation.data_cleaning import CLEANED_DATA_PATH
 from src.preparation.dataset_export import TARGET_MAPPING_CONFIG_PATH
 from src.preparation.dataset_preparation import (
-    COHORT_DATA_PATH, FEATURE_AUDIT_PATH, FULL_PREPARED_PATH, PREPARATION_CONFIG_PATH, PREPARATION_MANIFEST_PATH,
+    COHORT_DATA_PATH, FEATURE_AUDIT_PATH, FULL_PREPARED_PATH, ICD9_GROUP_RULE_VERSION,
+    PREPARATION_CONFIG_PATH, PREPARATION_MANIFEST_PATH,
 )
 
 
@@ -83,6 +85,10 @@ def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, 
                 "admission_type_source": "patients in the admission type",
                 "age_by_admission": "patients with the reported admission code",
                 "numeric_by_admission_zero_percent": "valid measurements for the reported admission code",
+                "diagnosis_position_depth": "full cohort",
+                "diagnosis_group_gain": "full cohort",
+                "diagnosis_group_pairs": "full cohort",
+                "diagnosis_source_codes": "patients with the group at any diagnosis position",
             },
             "selection_small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
             "information_coverage": {
@@ -95,6 +101,14 @@ def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, 
                 "small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
                 "numeric_small_valid_count_exclusive": MINIMUM_GROUP_SIZE,
                 "zero_valid_percent": "empty CSV field",
+            },
+            "diagnosis_detail": {
+                "grouping": ICD9_GROUP_RULE_VERSION,
+                "coverage_groups": "mapped groups with Missing and Unmapped tracked separately",
+                "pairs": "one count per patient per unordered pair of distinct mapped groups",
+                "source_code_counts": "one count per patient per source code; empty codes excluded",
+                "most_common_code_ties": "source code text order",
+                "small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
             },
             "rare_level_percent_exclusive": RARE_LEVEL_PERCENT,
             "empty_csv_fields_are_missing": True,
@@ -114,8 +128,8 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
     from matplotlib import pyplot as plt
 
     from src.eda.plots import (
-        plot_admission_type_source, plot_information_coverage, plot_nominal_distributions,
-        plot_numeric_distributions, plot_relationships,
+        plot_admission_type_source, plot_diagnosis_group_gain, plot_information_coverage,
+        plot_nominal_distributions, plot_numeric_distributions, plot_relationships,
     )
 
     inputs = input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS)
@@ -126,6 +140,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
     numeric = profile_numeric(eda.cohort)
     nominal = profile_nominal(eda)
     admission = profile_admission_context(eda.cohort, nominal.admission_descriptions)
+    diagnoses = profile_diagnosis_detail(eda.cohort, eda.source_cohort, nominal.diagnosis_summary)
     relationships = profile_relationships(eda.cohort)
     findings = summarize_findings(eda, completeness, numeric, nominal, relationships)
     tables = {
@@ -135,7 +150,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
         "admission_lookup": eda.admission_descriptions,
         "eda_findings": findings,
     }
-    for profile in (selection, completeness, coverage, numeric, nominal, admission, relationships):
+    for profile in (selection, completeness, coverage, numeric, nominal, admission, diagnoses, relationships):
         for field in fields(profile):
             value = getattr(profile, field.name)
             if isinstance(value, pd.DataFrame):
@@ -151,6 +166,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
             **plot_information_coverage(coverage, eda.admission_descriptions),
             **plot_nominal_distributions(nominal),
             "admission_type_source": plot_admission_type_source(admission.admission_type_source),
+            "diagnosis_group_gain": plot_diagnosis_group_gain(diagnoses.diagnosis_group_gain),
             **plot_relationships(relationships),
         }
         try:
