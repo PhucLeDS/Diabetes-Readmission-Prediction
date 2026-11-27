@@ -250,6 +250,43 @@ def plot_information_coverage(
     }
 
 
+def plot_admission_type_source(table: pd.DataFrame) -> Figure:
+    """Show the source shares within each admission type, with row denominators."""
+    types = table.drop_duplicates("admission_type_code").set_index("admission_type_code")
+    sources = table.drop_duplicates("admission_source_code").set_index("admission_source_code")
+    shares = table.pivot(
+        index="admission_type_code", columns="admission_source_code", values="percent_of_admission_type",
+    ).reindex(index=types.index, columns=sources.index)
+    cohort_size = int(types["type_patients"].sum())
+
+    figure, ax = plt.subplots(figsize=(16, 7), layout="constrained")
+    figure.suptitle(f"Admission Type and Source | Full prepared cohort (N = {cohort_size:,})")
+    heatmap = ax.imshow(shares, cmap="Blues", vmin=0, vmax=100, aspect="auto")
+    figure.colorbar(heatmap, ax=ax, shrink=0.8, label="Patients within admission type (%)")
+    type_labels = [
+        f"{code or '(Empty field)'} | {row.admission_type_description or row.admission_type_lookup_status}"
+        f" (n = {row.type_patients:,})"
+        for code, row in types.iterrows()
+    ]
+    source_labels = [
+        f"{code or '(Empty field)'} | " + shorten(
+            row.admission_source_description or row.admission_source_lookup_status, width=27, placeholder="...",
+        )
+        for code, row in sources.iterrows()
+    ]
+    ax.set_yticks(range(len(types)), labels=type_labels)
+    ax.set_xticks(range(len(sources)), labels=source_labels, rotation=45, ha="right", rotation_mode="anchor")
+    ax.set(xlabel="Admission source", ylabel="Admission type", title="Blank cells indicate zero patients")
+    for (row, column), percent in np.ndenumerate(shares.to_numpy(dtype=float)):
+        if percent > 0:
+            label = "<0.1" if percent < 0.1 else f"{percent:.1f}"
+            ax.text(
+                column, row, label, ha="center", va="center", fontsize=8,
+                color="white" if percent >= 60 else "#1c3345",
+            )
+    return figure
+
+
 def plot_relationships(profile: RelationshipProfile) -> dict[str, Figure]:
     """Plot stay summaries, prior visit proportions, and outcome totals."""
     cohort_size = int(profile.outcome_distribution["cohort_size"].iloc[0])

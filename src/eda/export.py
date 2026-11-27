@@ -13,6 +13,7 @@ from matplotlib import ft2font
 import numpy as np
 import pandas as pd
 
+from src.eda.admission_context import profile_admission_context
 from src.eda.cohort_selection import MINIMUM_GROUP_SIZE, profile_cohort_selection
 from src.eda.data import load_eda_inputs
 from src.eda.descriptive import QUANTILES, profile_completeness, profile_numeric
@@ -79,6 +80,9 @@ def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, 
                 "discharge_patient_overlap": "unique patients in the cleaned encounters",
                 "lab_recording_by_prior_history": "patients in the prior history group",
                 "lab_recording_by_characteristic": "patients at the reported characteristic level",
+                "admission_type_source": "patients in the admission type",
+                "age_by_admission": "patients with the reported admission code",
+                "numeric_by_admission_zero_percent": "valid measurements for the reported admission code",
             },
             "selection_small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
             "information_coverage": {
@@ -86,6 +90,11 @@ def _eda_manifest(inputs: dict, cohort_size: int, unclear_discharge_count: int, 
                 "unknown_prior_history": "at least one prior visit count is missing",
                 "unknown_lab_recording": "either laboratory value is empty or outside its source domain",
                 "zero_denominator_percent": "empty CSV field",
+            },
+            "admission_context": {
+                "small_cell_count_exclusive": MINIMUM_GROUP_SIZE,
+                "numeric_small_valid_count_exclusive": MINIMUM_GROUP_SIZE,
+                "zero_valid_percent": "empty CSV field",
             },
             "rare_level_percent_exclusive": RARE_LEVEL_PERCENT,
             "empty_csv_fields_are_missing": True,
@@ -105,7 +114,8 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
     from matplotlib import pyplot as plt
 
     from src.eda.plots import (
-        plot_information_coverage, plot_nominal_distributions, plot_numeric_distributions, plot_relationships,
+        plot_admission_type_source, plot_information_coverage, plot_nominal_distributions,
+        plot_numeric_distributions, plot_relationships,
     )
 
     inputs = input_checksums(INPUT_PATHS, root=PROJECT_ROOT, normalize_lf=LF_INPUTS)
@@ -115,6 +125,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
     coverage = profile_information_coverage(eda.cohort)
     numeric = profile_numeric(eda.cohort)
     nominal = profile_nominal(eda)
+    admission = profile_admission_context(eda.cohort, nominal.admission_descriptions)
     relationships = profile_relationships(eda.cohort)
     findings = summarize_findings(eda, completeness, numeric, nominal, relationships)
     tables = {
@@ -124,7 +135,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
         "admission_lookup": eda.admission_descriptions,
         "eda_findings": findings,
     }
-    for profile in (selection, completeness, coverage, numeric, nominal, relationships):
+    for profile in (selection, completeness, coverage, numeric, nominal, admission, relationships):
         for field in fields(profile):
             value = getattr(profile, field.name)
             if isinstance(value, pd.DataFrame):
@@ -139,6 +150,7 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
             **plot_numeric_distributions(numeric.numeric_frequency, cohort_size=len(eda.cohort)),
             **plot_information_coverage(coverage, eda.admission_descriptions),
             **plot_nominal_distributions(nominal),
+            "admission_type_source": plot_admission_type_source(admission.admission_type_source),
             **plot_relationships(relationships),
         }
         try:

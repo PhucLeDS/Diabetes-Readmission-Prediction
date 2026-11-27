@@ -10,12 +10,13 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from src.eda.admission_context import profile_admission_context
 from src.eda.data import _admission_descriptions, _load_source_cohort
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
 from src.eda.information_coverage import profile_information_coverage
 from src.io_utils import read_csv, read_json, sha256_file, write_csv
 from src.paths import PROJECT_ROOT
-from src.preparation.data_loading import ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
+from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
 from src.preparation.dataset_preparation import COHORT_DATA_PATH
 
 
@@ -78,6 +79,36 @@ class InformationCoverageTests(TestCase):
         self.assertEqual(by_stay.at["unknown", "percent_of_group"], 50)
 
 
+class AdmissionContextTests(TestCase):
+    def test_blank_codes_and_missing_counts_keep_their_denominators(self) -> None:
+        cohort = pd.DataFrame({
+            "admission_type_id": ["1", "1", ""],
+            "admission_source_id": ["7", "99", "7"],
+            "age": ["[20-30)", "[30-40)", ""],
+            **{column: pd.array([0, 2, pd.NA], dtype="Int64") for column in COUNT_COLUMNS},
+        })
+        descriptions = pd.DataFrame([
+            ("admission_type_id", "1", "Emergency", "Mapped"),
+            ("admission_type_id", "", "", "Empty CSV field"),
+            ("admission_source_id", "7", "Emergency Room", "Mapped"),
+            ("admission_source_id", "99", "", "Unmapped code"),
+        ], columns=["column", "code", "description", "lookup_status"])
+        admission = profile_admission_context(cohort, descriptions)
+        pairs = admission.admission_type_source.set_index(["admission_type_code", "admission_source_code"])
+        self.assertEqual(pairs.at[("1", "99"), "admission_source_lookup_status"], "Unmapped code")
+        self.assertEqual(pairs.at[("", "7"), "admission_type_lookup_status"], "Empty CSV field")
+        self.assertEqual(pairs.at[("", "99"), "patients"], 0)
+        self.assertEqual(pairs.at[("1", "99"), "percent_of_admission_type"], 50)
+
+        numeric = admission.numeric_by_admission.set_index(["column", "code", "measure"])
+        source = numeric.loc[("admission_source_id", "7", "number_inpatient")]
+        self.assertEqual((source["group_patients"], source["valid"], source["missing"]), (2, 1, 1))
+        self.assertEqual(source["zero_percent_of_valid"], 100)
+        no_valid = numeric.loc[("admission_type_id", "", "number_inpatient")]
+        self.assertTrue(pd.isna(no_valid["zero_percent_of_valid"]))
+        self.assertTrue(pd.isna(no_valid["median"]))
+
+
 class EdaExportTests(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -108,7 +139,7 @@ class EdaExportTests(TestCase):
         }
         files.pop(MANIFEST_PATH.as_posix())
         self.assertEqual(files, manifest["artifact_sha256"])
-        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 30, ".png": 12})
+        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 33, ".png": 13})
         for relative in files:
             if relative.endswith(".csv"):
                 columns = read_csv(self.output_dir / relative).columns
@@ -208,3 +239,35 @@ class EdaExportTests(TestCase):
                         self.assertAlmostEqual(percent, 100 * count / denominator)
                 else:
                     self.assertTrue(rows["percent_of_group"].eq("").all())
+
+    def test_admission_tables_reconcile_with_nominal_profiles(self) -> None:
+        def read_table(name: str) -> pd.DataFrame:
+            return read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")
+
+        nominal = read_table("admission_descriptions")
+        pairs = read_table("admission_type_source")
+        pairs["patients"] = pairs["patients"].astype(int)
+        ages = read_table("age_by_admission")
+        numeric = read_table("numeric_by_admission")
+
+        for column, key in (("admission_type_id", "admission_type_code"), ("admission_source_id", "admission_source_code")):
+            labels = nominal.loc[nominal["column"].eq(column)].set_index("code")
+            expected = labels["patients"].astype(int).to_dict()
+            self.assertEqual(pairs.groupby(key)["patients"].sum().to_dict(), expected)
+            age_rows = ages.loc[ages["column"].eq(column)].assign(patients=lambda rows: rows["patients"].astype(int))
+            self.assertEqual(age_rows.groupby("code")["patients"].sum().to_dict(), expected)
+            summaries = numeric.loc[numeric["column"].eq(column)]
+            self.assertEqual(set(summaries["measure"]), set(COUNT_COLUMNS))
+            for _, rows in summaries.groupby("measure"):
+                self.assertEqual(rows.set_index("code")["group_patients"].astype(int).to_dict(), expected)
+                self.assertEqual(
+                    (rows["valid"].astype(int) + rows["missing"].astype(int)).tolist(),
+                    rows["group_patients"].astype(int).tolist(),
+                )
+            status = pairs[[key, key.replace("_code", "_lookup_status")]].drop_duplicates().set_index(key)
+            self.assertEqual(status.iloc[:, 0].to_dict(), labels["lookup_status"].to_dict())
+
+        for _, rows in pairs.groupby("admission_type_code"):
+            self.assertEqual(set(rows["type_patients"].astype(int)), {rows["patients"].sum()})
+            for count, share in zip(rows["patients"], rows["percent_of_admission_type"].astype(float), strict=True):
+                self.assertAlmostEqual(share, 100 * count / rows["patients"].sum())
