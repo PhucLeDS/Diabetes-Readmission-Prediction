@@ -21,6 +21,7 @@ Thumbs.db
 
 # Java build files and temporary artifacts
 *.class
+/build/
 *.tmp
 *.temp
 
@@ -43,3 +44,6 @@ Thumbs.db
 # Generated Analysis artifacts
 /outputs/tables/analysis/*
 /outputs/figures/analysis/*
+
+# Generated model training results
+/outputs/tables/model_training/*
