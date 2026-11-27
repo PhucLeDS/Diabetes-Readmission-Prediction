@@ -153,14 +153,19 @@ def _read_preparation_artifact(
     return read_csv(artifact, expected_columns=expected_columns)
 
 
+def align_source_cohort(cohort: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
+    """Verify complete encounter-patient membership and align the source to the cohort."""
+    cohort_keys = cohort.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
+    source_keys = source.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
+    validate_partitions(cohort_keys, {"source cohort": source_keys})
+    return source.set_index("encounter_id", drop=False).loc[cohort["encounter_id"]].set_axis(cohort.index)
+
+
 def _load_source_cohort(project_root: Path, manifest: dict, prepared: pd.DataFrame) -> pd.DataFrame:
     source = _read_preparation_artifact(
         COHORT_DATA_PATH, project_root, manifest, expected_columns=ENCOUNTER_COLUMNS,
     )
-    prepared_keys = prepared.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
-    source_keys = source.loc[:, list(ID_COLUMNS)].itertuples(index=False, name=None)
-    validate_partitions(prepared_keys, {"source cohort": source_keys})
-    return source
+    return align_source_cohort(prepared, source)
 
 
 def load_eda_inputs(*, project_root: Path = PROJECT_ROOT) -> EdaInputs:

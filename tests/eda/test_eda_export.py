@@ -11,12 +11,13 @@ from unittest.mock import patch
 import pandas as pd
 
 from src.eda.admission_context import profile_admission_context
-from src.eda.data import MEDICATION_COLUMNS, _admission_descriptions, _load_source_cohort
+from src.eda.data import MEDICATION_COLUMNS, _admission_descriptions, _load_source_cohort, align_source_cohort
+from src.eda.descriptive import profile_completeness
 from src.eda.diagnosis_detail import profile_diagnosis_detail
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
 from src.eda.information_coverage import profile_information_coverage
 from src.eda.medication_detail import EXCLUDED_MEDICATION_COLUMNS, profile_medication_detail
-from src.eda.nominal import _diagnosis_summaries
+from src.eda.nominal import _diagnosis_summaries, _laboratory_summary
 from src.io_utils import read_csv, read_json, sha256_file, write_csv
 from src.paths import PROJECT_ROOT
 from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
@@ -55,6 +56,24 @@ class CohortInputTests(TestCase):
                 _load_source_cohort(root, manifest, prepared)
 
 
+    def test_aligns_reordered_source_and_rejects_membership_errors(self) -> None:
+        cohort = pd.DataFrame({"encounter_id": ["001", "002"], "patient_nbr": ["101", "102"]}, index=[7, 9])
+        source = cohort.assign(source_value=["first", "second"]).iloc[::-1].reset_index(drop=True)
+        aligned = align_source_cohort(cohort, source)
+        pd.testing.assert_frame_equal(aligned, cohort.assign(source_value=["first", "second"]))
+
+        other = pd.DataFrame({"encounter_id": ["003"], "patient_nbr": ["103"], "source_value": ["extra"]})
+        invalid_sources = (
+            ("missing", source.iloc[:1]),
+            ("extra", pd.concat([source, other])),
+            ("duplicate", source.iloc[[0, 0]]),
+            ("wrong patient", source.assign(patient_nbr=["999", "101"])),
+        )
+        for case, invalid in invalid_sources:
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                align_source_cohort(cohort, invalid)
+
+
 class InformationCoverageTests(TestCase):
     def test_missing_counts_and_invalid_laboratory_fields_remain_unknown(self) -> None:
         cohort = pd.DataFrame({
@@ -80,6 +99,35 @@ class InformationCoverageTests(TestCase):
         by_stay = rows.loc[rows["characteristic"].eq("time_in_hospital")].set_index("lab_recording_pattern")
         self.assertEqual(by_stay.at["unknown", "patients"], 3)
         self.assertEqual(by_stay.at["unknown", "percent_of_group"], 50)
+
+        for column in ("diag_1_group", "diag_2_group", "diag_3_group"):
+            cohort[column] = "Missing"
+        lookup = pd.DataFrame(columns=["column", "lookup_status", "code"])
+        completeness = profile_completeness(cohort, lookup)
+        patterns = completeness.lab_recording_patterns
+        states = ["a1c_result_recorded", "glucose_result_recorded"]
+        patients = patterns["patients"]
+        self.assertEqual(patients.sum(), len(cohort))
+        self.assertEqual(patients.loc[patterns[states].isna().any(axis=1)].sum(), by_stay.at["unknown", "patients"])
+        neither = patterns[states].eq(False).fillna(False).all(axis=1)
+        self.assertEqual(patients.loc[neither].sum(), by_stay.at["neither", "patients"])
+
+        # Use the same cohort to compare per-test nominal frequencies with completeness.
+        frequency = (
+            cohort[["A1Cresult", "max_glu_serum"]].fillna("").melt(var_name="column", value_name="value")
+            .value_counts().reset_index(name="patients").assign(cohort_size=len(cohort))
+        )
+        frequency["is_empty_field"] = frequency["value"].eq("")
+        frequency["is_rare_level"] = False
+        nominal = _laboratory_summary(frequency)
+        special = completeness.special_values.set_index(["column", "category"])["patients"]
+        for lab, rows in nominal.groupby("column"):
+            recorded = rows["result_recorded"]
+            self.assertEqual(rows.loc[recorded, "patients"].sum(), special.at[(lab, "Recorded result")])
+            self.assertEqual(rows.loc[recorded.eq(False), "patients"].sum(), special.at[(lab, "None")])
+            self.assertEqual(rows.loc[recorded.isna(), "patients"].sum(), special.at[(lab, "Unknown recording status")])
+            self.assertTrue(recorded.isna().eq(~rows["value"].isin(["None", "Norm", ">200"])).all())
+            self.assertTrue(rows.loc[recorded.isna(), "percent_of_recorded"].isna().all())
 
 
 class AdmissionContextTests(TestCase):
@@ -150,9 +198,9 @@ class DiagnosisDetailTests(TestCase):
     def test_rejects_mismatched_keys_or_group_assignments(self) -> None:
         wrong_patient = self.source.copy()
         wrong_patient.loc[0, "patient_nbr"] = "999"
-        with self.assertRaisesRegex(ValueError, "Patient IDs differ"):
+        with self.assertRaisesRegex(ValueError, "Patient ID differs"):
             profile_diagnosis_detail(self.cohort, wrong_patient, self.summary)
-        with self.assertRaisesRegex(ValueError, "encounter IDs differ"):
+        with self.assertRaisesRegex(ValueError, "encounter.*missing"):
             profile_diagnosis_detail(self.cohort, self.source.iloc[1:], self.summary)
         wrong_code = self.source.copy()
         wrong_code.loc[0, "diag_1"] = "401.9"

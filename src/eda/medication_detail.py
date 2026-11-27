@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from src.eda.cohort_selection import MINIMUM_GROUP_SIZE
-from src.eda.data import MEDICATION_COLUMNS
+from src.eda.data import MEDICATION_COLUMNS, align_source_cohort
 from src.eda.nominal import MEDICATION_LEVELS
 from src.preparation.data_loading import ID_COLUMNS
 
@@ -116,18 +116,8 @@ def _flag_reconciliation(
 
 def profile_medication_detail(cohort: pd.DataFrame, source_cohort: pd.DataFrame) -> MedicationDetail:
     """Summarize retained medication statuses and check matching excluded columns."""
-    keys = pd.MultiIndex.from_frame(cohort.loc[:, list(ID_COLUMNS)])
-    excluded = source_cohort.loc[:, [*ID_COLUMNS, *EXCLUDED_MEDICATION_COLUMNS]].set_index(
-        list(ID_COLUMNS),
-    )
-    if (
-        not keys.is_unique
-        or not excluded.index.is_unique
-        or len(keys) != len(excluded)
-        or not keys.isin(excluded.index).all()
-    ):
-        raise ValueError("Prepared and source medication encounter-patient keys differ.")
-    excluded = excluded.loc[keys].set_axis(cohort.index)
+    source = align_source_cohort(cohort, source_cohort.loc[:, [*ID_COLUMNS, *EXCLUDED_MEDICATION_COLUMNS]])
+    excluded = source.loc[:, list(EXCLUDED_MEDICATION_COLUMNS)]
     retained = cohort.loc[:, list(MEDICATION_COLUMNS)]
     recorded = retained.isin(RECORDED_STATUSES)
     adjusted = retained.isin(ADJUSTED_STATUSES)

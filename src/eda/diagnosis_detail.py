@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from src.eda.cohort_selection import MINIMUM_GROUP_SIZE
+from src.eda.data import align_source_cohort
 from src.preparation.data_loading import ID_COLUMNS
 from src.preparation.dataset_preparation import (
     DIAGNOSIS_COLUMNS, DIAGNOSIS_GROUP_COLUMNS, DIAGNOSIS_GROUPS, group_icd9,
@@ -23,18 +24,6 @@ class DiagnosisDetail:
     diagnosis_group_pairs: pd.DataFrame
     diagnosis_source_code_summary: pd.DataFrame
     diagnosis_source_code_detail: pd.DataFrame
-
-
-def _align_diagnoses(cohort: pd.DataFrame, source_cohort: pd.DataFrame) -> pd.DataFrame:
-    aligned = cohort.loc[:, [*ID_COLUMNS, *DIAGNOSIS_GROUP_COLUMNS]].merge(
-        source_cohort.loc[:, [*ID_COLUMNS, *DIAGNOSIS_COLUMNS]],
-        on="encounter_id", how="inner", suffixes=("", "_source"), validate="one_to_one",
-    )
-    if len(aligned) != len(cohort) or len(aligned) != len(source_cohort):
-        raise ValueError("Prepared and source diagnosis encounter IDs differ.")
-    if not aligned["patient_nbr"].eq(aligned["patient_nbr_source"]).fillna(False).all():
-        raise ValueError("Patient IDs differ between prepared and source diagnoses.")
-    return aligned
 
 
 def _diagnosis_positions(aligned: pd.DataFrame) -> pd.DataFrame:
@@ -119,7 +108,8 @@ def profile_diagnosis_detail(
     cohort: pd.DataFrame, source_cohort: pd.DataFrame, diagnosis_summary: pd.DataFrame,
 ) -> DiagnosisDetail:
     """Compare aligned diagnoses and reconcile the prepared grouping with its source codes."""
-    aligned = _align_diagnoses(cohort, source_cohort)
+    source = align_source_cohort(cohort, source_cohort.loc[:, [*ID_COLUMNS, *DIAGNOSIS_COLUMNS]])
+    aligned = pd.concat([cohort.loc[:, [*ID_COLUMNS, *DIAGNOSIS_GROUP_COLUMNS]], source[list(DIAGNOSIS_COLUMNS)]], axis=1)
     positions = _diagnosis_positions(aligned)
     summary, detail = _source_code_counts(positions)
     return DiagnosisDetail(

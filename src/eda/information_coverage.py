@@ -7,7 +7,7 @@ import pandas as pd
 from src.eda.cohort_selection import MINIMUM_GROUP_SIZE
 from src.eda.data import ADMISSION_COLUMNS
 from src.eda.descriptive import PRIOR_VISIT_COLUMNS
-from src.eda.nominal import LAB_LEVELS
+from src.eda.laboratory import laboratory_result_recorded
 
 
 PRIOR_HISTORY_GROUPS = ("no_recorded_prior_visits", "any_recorded_prior_visit", "unknown")
@@ -32,15 +32,13 @@ def _prior_history(cohort: pd.DataFrame) -> pd.Series:
 
 
 def _laboratory_recording(cohort: pd.DataFrame) -> pd.Series:
-    a1c, glucose = cohort["A1Cresult"], cohort["max_glu_serum"]
-    known = a1c.isin(LAB_LEVELS[a1c.name]) & glucose.isin(LAB_LEVELS[glucose.name])
-    a1c_recorded = a1c.ne("None").fillna(False)
-    glucose_recorded = glucose.ne("None").fillna(False)
+    a1c_recorded = laboratory_result_recorded(cohort["A1Cresult"], "A1Cresult")
+    glucose_recorded = laboratory_result_recorded(cohort["max_glu_serum"], "max_glu_serum")
     patterns = pd.Series("neither", index=cohort.index, name="lab_recording_pattern", dtype="string")
     patterns.loc[a1c_recorded & ~glucose_recorded] = "a1c_only"
     patterns.loc[~a1c_recorded & glucose_recorded] = "glucose_only"
     patterns.loc[a1c_recorded & glucose_recorded] = "both"
-    patterns.loc[~known] = "unknown"
+    patterns.loc[a1c_recorded.isna() | glucose_recorded.isna()] = "unknown"
     return patterns
 
 
