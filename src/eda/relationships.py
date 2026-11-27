@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.eda.data import MEDICATION_COLUMNS
 from src.eda.descriptive import PRIOR_VISIT_COLUMNS, QUANTILES, _with_percent
+from src.eda.medication_detail import retained_medication_flag_measures
 from src.eda.nominal import AGE_BANDS
 from src.preparation.data_loading import TARGET_COLUMN, TARGET_LABELS
 from src.preparation.dataset_export import (
@@ -61,12 +62,10 @@ def _age_prior_visits(cohort: pd.DataFrame) -> pd.DataFrame:
 
 
 def _medication_flags(cohort: pd.DataFrame) -> pd.DataFrame:
-    statuses = cohort.loc[:, list(MEDICATION_COLUMNS)].fillna("")
-    non_no_count = (~statuses.isin(["", "No"])).sum(axis=1)
-    has_up_or_down = statuses.isin(["Up", "Down"]).any(axis=1).astype(int)
+    non_no_count, has_up_or_down = retained_medication_flag_measures(cohort.loc[:, list(MEDICATION_COLUMNS)])
     comparisons = (
         ("diabetesMed", "Retained medications with a recorded non-No status", non_no_count),
-        ("change", "Any retained medication with Up or Down (0 = no, 1 = yes)", has_up_or_down),
+        ("change", "Any retained medication with Up or Down (0 = no, 1 = yes)", has_up_or_down.astype(int)),
     )
     tables = []
     for flag, measure, retained_status in comparisons:

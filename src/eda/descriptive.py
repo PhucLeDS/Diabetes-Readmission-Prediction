@@ -5,11 +5,11 @@ from dataclasses import dataclass
 import pandas as pd
 
 from src.eda.data import ADMISSION_COLUMNS
+from src.eda.laboratory import LAB_COLUMNS, laboratory_result_recorded
 from src.preparation.data_loading import COUNT_COLUMNS
 from src.preparation.dataset_preparation import DIAGNOSIS_GROUP_COLUMNS
 
 
-LAB_COLUMNS = ("A1Cresult", "max_glu_serum")
 PRIOR_VISIT_COLUMNS = ("number_outpatient", "number_emergency", "number_inpatient")
 QUANTILES = {"q1": 0.25, "median": 0.5, "q3": 0.75, "p95": 0.95, "p99": 0.99}
 
@@ -72,21 +72,24 @@ def profile_completeness(cohort: pd.DataFrame, admission_descriptions: pd.DataFr
         "empty_percent": (100 * empty_counts / cohort_size).to_numpy(),
     })
 
-    recorded = ~empty.loc[:, list(LAB_COLUMNS)] & cohort.loc[:, list(LAB_COLUMNS)].ne("None").fillna(False)
+    recorded = pd.DataFrame({column: laboratory_result_recorded(cohort[column], column) for column in LAB_COLUMNS})
+    patterns = recorded.value_counts(dropna=False)
+    known_patterns = pd.MultiIndex.from_product([[True, False], [True, False]], names=LAB_COLUMNS)
+    unknown_patterns = patterns.index[patterns.index.to_frame(index=False).isna().any(axis=1)]
     lab_patterns = (
-        recorded.value_counts()
-        .reindex(
-            pd.MultiIndex.from_product([[True, False], [True, False]], names=LAB_COLUMNS),
-            fill_value=0,
-        )
+        patterns.reindex(known_patterns.append(unknown_patterns), fill_value=0)
         .rename_axis(index=["a1c_result_recorded", "glucose_result_recorded"])
         .reset_index(name="patients")
     )
 
     special = []
     for column in LAB_COLUMNS:
-        special.append((column, "None", cohort[column].eq("None").sum()))
-        special.append((column, "Recorded result", recorded[column].sum()))
+        status = recorded[column]
+        special.append((column, "None", status.eq(False).sum()))
+        special.append((column, "Recorded result", status.sum()))
+        unknown = status.isna().sum()
+        if unknown:
+            special.append((column, "Unknown recording status", unknown))
     for column in DIAGNOSIS_GROUP_COLUMNS:
         for category in ("Missing", "Unmapped"):
             special.append((column, category, cohort[column].eq(category).sum()))

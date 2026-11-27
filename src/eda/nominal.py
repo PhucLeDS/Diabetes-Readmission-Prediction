@@ -5,7 +5,8 @@ from dataclasses import dataclass
 import pandas as pd
 
 from src.eda.data import ADMISSION_COLUMNS, MEDICATION_COLUMNS, EdaInputs
-from src.eda.descriptive import LAB_COLUMNS, _with_percent
+from src.eda.descriptive import _with_percent
+from src.eda.laboratory import LAB_COLUMNS, LAB_LEVELS, laboratory_result_recorded
 from src.preparation.dataset_preparation import DIAGNOSIS_GROUP_COLUMNS, DIAGNOSIS_GROUPS
 
 
@@ -13,10 +14,6 @@ DEMOGRAPHIC_COLUMNS = ("age", "race", "gender")
 MEDICATION_FLAG_COLUMNS = ("change", "diabetesMed")
 MEDICATION_LEVELS = ("No", "Steady", "Up", "Down")
 AGE_BANDS = tuple(f"[{age}-{age + 10})" for age in range(0, 100, 10))
-LAB_LEVELS = {
-    "A1Cresult": ("Norm", ">7", ">8", "None"),
-    "max_glu_serum": ("Norm", ">200", ">300", "None"),
-}
 RARE_LEVEL_PERCENT = 1.0
 
 
@@ -91,7 +88,9 @@ def _admission_summary(frequency: pd.DataFrame, lookup: pd.DataFrame) -> pd.Data
 
 def _laboratory_summary(frequency: pd.DataFrame) -> pd.DataFrame:
     table = frequency.loc[frequency["column"].isin(LAB_COLUMNS)].copy()
-    recorded = ~table["is_empty_field"] & table["value"].ne("None")
+    recorded = pd.concat([
+        laboratory_result_recorded(group["value"], column) for column, group in table.groupby("column")
+    ]).reindex(table.index)
     totals = table["patients"].where(recorded, 0).groupby(table["column"]).transform("sum")
     table["result_recorded"] = recorded
     table["patients_with_result"] = totals

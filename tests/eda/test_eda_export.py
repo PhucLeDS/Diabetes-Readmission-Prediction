@@ -10,11 +10,18 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from src.eda.data import _admission_descriptions
+from src.eda.admission_context import profile_admission_context
+from src.eda.data import MEDICATION_COLUMNS, _admission_descriptions, _load_source_cohort, align_source_cohort
+from src.eda.descriptive import profile_completeness
+from src.eda.diagnosis_detail import profile_diagnosis_detail
 from src.eda.export import INPUT_PATHS, MANIFEST_PATH, TABLE_DIR, export_eda
-from src.io_utils import read_csv, read_json, sha256_file
+from src.eda.information_coverage import profile_information_coverage
+from src.eda.medication_detail import EXCLUDED_MEDICATION_COLUMNS, profile_medication_detail
+from src.eda.nominal import _diagnosis_summaries, _laboratory_summary
+from src.io_utils import read_csv, read_json, sha256_file, write_csv
 from src.paths import PROJECT_ROOT
-from src.preparation.data_loading import MAPPING_COLUMNS, RawTable
+from src.preparation.data_loading import COUNT_COLUMNS, ENCOUNTER_COLUMNS, MAPPING_COLUMNS, RawTable
+from src.preparation.dataset_preparation import COHORT_DATA_PATH
 
 
 class AdmissionLookupTests(TestCase):
@@ -32,6 +39,221 @@ class AdmissionLookupTests(TestCase):
         self.assertEqual(lookup.loc[("admission_type_id", "99"), "description"], "")
         self.assertEqual(lookup.loc[("admission_type_id", "99"), "lookup_status"], "Unmapped code")
         self.assertEqual(lookup.loc[("admission_source_id", "7"), "lookup_status"], "Mapped")
+
+
+class CohortInputTests(TestCase):
+    def test_rejects_wrong_patient_for_verified_encounter(self) -> None:
+        key = COHORT_DATA_PATH.relative_to(PROJECT_ROOT).as_posix()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = pd.DataFrame(
+                [{"encounter_id": "001", "patient_nbr": "101"}], columns=ENCOUNTER_COLUMNS, dtype="string",
+            ).fillna("")
+            path = write_csv(root / key, source)
+            manifest = {"artifact_sha256": {key: sha256_file(path)}}
+            prepared = pd.DataFrame({"encounter_id": ["001"], "patient_nbr": ["102"]})
+            with self.assertRaisesRegex(ValueError, "Patient ID differs"):
+                _load_source_cohort(root, manifest, prepared)
+
+
+    def test_aligns_reordered_source_and_rejects_membership_errors(self) -> None:
+        cohort = pd.DataFrame({"encounter_id": ["001", "002"], "patient_nbr": ["101", "102"]}, index=[7, 9])
+        source = cohort.assign(source_value=["first", "second"]).iloc[::-1].reset_index(drop=True)
+        aligned = align_source_cohort(cohort, source)
+        pd.testing.assert_frame_equal(aligned, cohort.assign(source_value=["first", "second"]))
+
+        other = pd.DataFrame({"encounter_id": ["003"], "patient_nbr": ["103"], "source_value": ["extra"]})
+        invalid_sources = (
+            ("missing", source.iloc[:1]),
+            ("extra", pd.concat([source, other])),
+            ("duplicate", source.iloc[[0, 0]]),
+            ("wrong patient", source.assign(patient_nbr=["999", "101"])),
+        )
+        for case, invalid in invalid_sources:
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                align_source_cohort(cohort, invalid)
+
+    def test_rejects_two_encounters_for_the_same_patient(self) -> None:
+        cohort = pd.DataFrame({"encounter_id": ["001", "002"], "patient_nbr": ["101", "101"]})
+        source = cohort.iloc[::-1].reset_index(drop=True)
+        with self.assertRaisesRegex(ValueError, "Duplicate cohort patient_nbr"):
+            align_source_cohort(cohort, source)
+
+
+class InformationCoverageTests(TestCase):
+    def test_missing_counts_and_invalid_laboratory_fields_remain_unknown(self) -> None:
+        cohort = pd.DataFrame({
+            "number_outpatient": pd.array([0, 1, 1, 0, 0, 0], dtype="Int64"),
+            "number_emergency": pd.array([0, 0, pd.NA, 0, 0, 0], dtype="Int64"),
+            "number_inpatient": pd.array([0, 0, 1, 0, 0, 0], dtype="Int64"),
+            "A1Cresult": ["None", "Norm", "None", "", "Unexpected", "None"],
+            "max_glu_serum": ["None", "None", ">200", "None", "Norm", pd.NA],
+            "age": ["[20-30)"] * 6,
+            "admission_type_id": ["1"] * 6,
+            "admission_source_id": ["7"] * 6,
+            "time_in_hospital": pd.array([1, 1, 1, 1, 1, 1], dtype="Int64"),
+        })
+        coverage = profile_information_coverage(cohort)
+        history = coverage.lab_recording_by_prior_history.set_index(["prior_history", "lab_recording_pattern"])
+        self.assertEqual(history.loc[history["patients"].gt(0), "patients"].to_dict(), {
+            ("no_recorded_prior_visits", "neither"): 1,
+            ("no_recorded_prior_visits", "unknown"): 3,
+            ("any_recorded_prior_visit", "a1c_only"): 1,
+            ("unknown", "glucose_only"): 1,
+        })
+        rows = coverage.lab_recording_by_characteristic
+        by_stay = rows.loc[rows["characteristic"].eq("time_in_hospital")].set_index("lab_recording_pattern")
+        self.assertEqual(by_stay.at["unknown", "patients"], 3)
+        self.assertEqual(by_stay.at["unknown", "percent_of_group"], 50)
+
+        for column in ("diag_1_group", "diag_2_group", "diag_3_group"):
+            cohort[column] = "Missing"
+        lookup = pd.DataFrame(columns=["column", "lookup_status", "code"])
+        completeness = profile_completeness(cohort, lookup)
+        patterns = completeness.lab_recording_patterns
+        states = ["a1c_result_recorded", "glucose_result_recorded"]
+        patients = patterns["patients"]
+        self.assertEqual(patients.sum(), len(cohort))
+        self.assertEqual(patients.loc[patterns[states].isna().any(axis=1)].sum(), by_stay.at["unknown", "patients"])
+        neither = patterns[states].eq(False).fillna(False).all(axis=1)
+        self.assertEqual(patients.loc[neither].sum(), by_stay.at["neither", "patients"])
+
+        # Use the same cohort to compare per-test nominal frequencies with completeness.
+        frequency = (
+            cohort[["A1Cresult", "max_glu_serum"]].fillna("").melt(var_name="column", value_name="value")
+            .value_counts().reset_index(name="patients").assign(cohort_size=len(cohort))
+        )
+        frequency["is_empty_field"] = frequency["value"].eq("")
+        frequency["is_rare_level"] = False
+        nominal = _laboratory_summary(frequency)
+        special = completeness.special_values.set_index(["column", "category"])["patients"]
+        for lab, rows in nominal.groupby("column"):
+            recorded = rows["result_recorded"]
+            self.assertEqual(rows.loc[recorded, "patients"].sum(), special.at[(lab, "Recorded result")])
+            self.assertEqual(rows.loc[recorded.eq(False), "patients"].sum(), special.at[(lab, "None")])
+            self.assertEqual(rows.loc[recorded.isna(), "patients"].sum(), special.at[(lab, "Unknown recording status")])
+            self.assertTrue(recorded.isna().eq(~rows["value"].isin(["None", "Norm", ">200"])).all())
+            self.assertTrue(rows.loc[recorded.isna(), "percent_of_recorded"].isna().all())
+
+
+class AdmissionContextTests(TestCase):
+    def test_blank_codes_and_missing_counts_keep_their_denominators(self) -> None:
+        cohort = pd.DataFrame({
+            "admission_type_id": ["1", "1", ""],
+            "admission_source_id": ["7", "99", "7"],
+            "age": ["[20-30)", "[30-40)", ""],
+            **{column: pd.array([0, 2, pd.NA], dtype="Int64") for column in COUNT_COLUMNS},
+        })
+        descriptions = pd.DataFrame([
+            ("admission_type_id", "1", "Emergency", "Mapped"),
+            ("admission_type_id", "", "", "Empty CSV field"),
+            ("admission_source_id", "7", "Emergency Room", "Mapped"),
+            ("admission_source_id", "99", "", "Unmapped code"),
+        ], columns=["column", "code", "description", "lookup_status"])
+        admission = profile_admission_context(cohort, descriptions)
+        pairs = admission.admission_type_source.set_index(["admission_type_code", "admission_source_code"])
+        self.assertEqual(pairs.at[("1", "99"), "admission_source_lookup_status"], "Unmapped code")
+        self.assertEqual(pairs.at[("", "7"), "admission_type_lookup_status"], "Empty CSV field")
+        self.assertEqual(pairs.at[("", "99"), "patients"], 0)
+        self.assertEqual(pairs.at[("1", "99"), "percent_of_admission_type"], 50)
+
+        numeric = admission.numeric_by_admission.set_index(["column", "code", "measure"])
+        source = numeric.loc[("admission_source_id", "7", "number_inpatient")]
+        self.assertEqual((source["group_patients"], source["valid"], source["missing"]), (2, 1, 1))
+        self.assertEqual(source["zero_percent_of_valid"], 100)
+        no_valid = numeric.loc[("admission_type_id", "", "number_inpatient")]
+        self.assertTrue(pd.isna(no_valid["zero_percent_of_valid"]))
+        self.assertTrue(pd.isna(no_valid["median"]))
+
+
+class DiagnosisDetailTests(TestCase):
+    def setUp(self) -> None:
+        self.cohort = pd.DataFrame({
+            "encounter_id": ["001", "002", "003", "004"],
+            "patient_nbr": ["101", "102", "103", "104"],
+            "diag_1_group": ["Circulatory", "Other_V", "Missing", "Other_E"],
+            "diag_2_group": ["Circulatory", "Circulatory", "Unmapped", "Missing"],
+            "diag_3_group": ["Other_V", "Circulatory", "Missing", "Missing"],
+        })
+        self.source = pd.DataFrame({
+            "encounter_id": ["002", "001", "003", "004"],
+            "patient_nbr": ["102", "101", "103", "104"],
+            "diag_1": ["V45.81", "401.9", "", "E812.0"],
+            "diag_2": ["401", "401.9", "bad", ""],
+            "diag_3": ["401.9", "V45.81", "", ""],
+        })
+        self.summary, _ = _diagnosis_summaries(self.cohort)
+
+    def test_repeated_groups_pairs_and_source_codes_count_each_patient_once(self) -> None:
+        diagnoses = profile_diagnosis_detail(self.cohort, self.source, self.summary)
+        depth = diagnoses.diagnosis_position_depth.set_index([
+            "mapped_positions", "distinct_mapped_groups", "missing_positions", "unmapped_positions",
+        ])
+        self.assertEqual(depth.at[(3, 2, 0, 0), "patients"], 2)
+        self.assertEqual(depth.at[(0, 0, 2, 1), "patients"], 1)
+        self.assertEqual(diagnoses.diagnosis_group_pairs.set_index(["group_1", "group_2"])["patients"].to_dict(), {
+            ("Circulatory", "Other_V"): 2,
+        })
+        counts = diagnoses.diagnosis_source_code_detail.set_index(["group", "source_code"])
+        self.assertEqual(counts.at[("Circulatory", "401.9"), "patients"], 2)
+        self.assertEqual(counts.at[("Circulatory", "401"), "percent_of_group"], 50)
+        self.assertEqual(counts.at[("Other_E", "E812.0"), "patients"], 1)
+        self.assertEqual(counts.at[("Unmapped", "bad"), "patients"], 1)
+        self.assertNotIn("", counts.index.get_level_values("source_code"))
+
+    def test_rejects_mismatched_keys_or_group_assignments(self) -> None:
+        wrong_patient = self.source.copy()
+        wrong_patient.loc[0, "patient_nbr"] = "999"
+        with self.assertRaisesRegex(ValueError, "Patient ID differs"):
+            profile_diagnosis_detail(self.cohort, wrong_patient, self.summary)
+        with self.assertRaisesRegex(ValueError, "encounter.*missing"):
+            profile_diagnosis_detail(self.cohort, self.source.iloc[1:], self.summary)
+        wrong_code = self.source.copy()
+        wrong_code.loc[0, "diag_1"] = "401.9"
+        with self.assertRaisesRegex(ValueError, "disagrees with its prepared diagnosis group"):
+            profile_diagnosis_detail(self.cohort, wrong_code, self.summary)
+
+
+class MedicationDetailTests(TestCase):
+    def test_counts_pairs_and_unknown_statuses(self) -> None:
+        identifiers = {
+            "encounter_id": ["001", "002", "003", "004", "005"],
+            "patient_nbr": ["101", "102", "103", "104", "105"],
+        }
+        cohort = pd.DataFrame({
+            **identifiers,
+            **dict.fromkeys(MEDICATION_COLUMNS, "No"),
+            "insulin": ["Steady", "No", "No", pd.NA, "Up"],
+            "metformin": ["Up", "No", "No", "No", "Steady"],
+            "glipizide": ["Steady", "No", "No", "", pd.NA],
+            "diabetesMed": "Yes",
+            "change": "Ch",
+        })
+        source = pd.DataFrame({
+            **identifiers,
+            **dict.fromkeys(EXCLUDED_MEDICATION_COLUMNS, "No"),
+            "miglitol": ["No", "Up", "No", "No", "No"],
+            "tolazamide": ["No", pd.NA, "Unexpected", "No", "No"],
+        }).iloc[::-1]
+        result = profile_medication_detail(cohort, source)
+        distribution = result.medication_count_distribution.set_index(["measure", "medications"])
+        self.assertEqual(distribution.at[("recorded_status", 0), "patients"], 3)
+        self.assertEqual(distribution.at[("recorded_status", 3), "patients"], 1)
+        self.assertEqual(distribution.at[("up_or_down", 1), "patients"], 2)
+        self.assertEqual(distribution.at[("recorded_status", 0), "patients_with_unknown_retained_status"], 1)
+        pairs = result.insulin_medication_pairs.set_index("medication")
+        self.assertEqual(pairs.at["metformin", "pair_patients"], 2)
+        self.assertEqual(pairs.at["glipizide", "pair_patients"], 1)
+        self.assertEqual(pairs.at["glipizide", "insulin_patients_with_unknown_medication_status"], 1)
+
+        reconciliation = result.medication_flag_reconciliation.set_index(["source_flag", "excluded_status"])
+        for flag in ("diabetesMed", "change"):
+            self.assertEqual(reconciliation.loc[flag, "patients"].to_dict(), {
+                "matching_status_recorded": 1, "no_matching_status_recorded": 1, "unknown": 1,
+            })
+            self.assertEqual(reconciliation.at[(flag, "matching_status_recorded"), "matching_excluded_columns"], "miglitol")
+            self.assertEqual(reconciliation.at[(flag, "no_matching_status_recorded"),
+                                                "patients_with_unknown_retained_status"], 1)
 
 
 class EdaExportTests(TestCase):
@@ -64,7 +286,7 @@ class EdaExportTests(TestCase):
         }
         files.pop(MANIFEST_PATH.as_posix())
         self.assertEqual(files, manifest["artifact_sha256"])
-        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 24, ".png": 10})
+        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 42, ".png": 14})
         for relative in files:
             if relative.endswith(".csv"):
                 columns = read_csv(self.output_dir / relative).columns
@@ -94,3 +316,191 @@ class EdaExportTests(TestCase):
         findings = {row["finding"]: row for row in table("eda_findings")}
         self.assertIn("28,511/69,990", findings["Any Readmission"]["evidence"])
         self.assertIn("54,041/69,990", findings["Laboratory coverage"]["evidence"])
+
+    def test_handoff_connects_analysis_directions_to_exported_evidence(self) -> None:
+        findings = read_csv(self.output_dir / TABLE_DIR / "eda_findings.csv").set_index("finding")
+        self.assertTrue(findings.index.is_unique)
+        self.assertIn("215/246 (87.40%)", findings.at["Laboratory coverage by admission type", "evidence"])
+        self.assertIn("215/4,516 (4.76%)", findings.at["Laboratory coverage by admission type", "evidence"])
+        self.assertIn("30,719/69,990 (43.89%)", findings.at["Diagnosis count distribution", "evidence"])
+        self.assertIn("73/69,990 (0.10%)", findings.at["Diagnosis count distribution", "evidence"])
+        self.assertIn("21,830 patients", findings.at["Diabetes diagnosis group coverage", "evidence"])
+        self.assertIn("31.19 percentage points", findings.at["Diabetes diagnosis group coverage", "evidence"])
+        for sources in findings["source_table"]:
+            for filename in sources.split(", "):
+                self.assertTrue((self.output_dir / TABLE_DIR / filename).is_file(), filename)
+
+        directions = read_csv(self.output_dir / TABLE_DIR / "eda_analysis_directions.csv")
+        self.assertTrue(directions["direction"].is_unique)
+        self.assertFalse(directions.eq("").any().any())
+        links = directions["supporting_findings"].str.split(", ").explode()
+        self.assertEqual(set(links), set(findings.index))
+        self.assertIn("38,430/68,706", findings.at["Diagnosis depth and overlap", "evidence"])
+        self.assertIn("13,607/69,990", findings.at["Diagnosis depth and overlap", "evidence"])
+        self.assertIn("22,129/69,990", findings.at["Insulin and metformin records", "evidence"])
+        self.assertIn("763/2,423", findings.at["Discharge eligibility", "evidence"])
+
+    def test_cohort_selection_counts_reconcile(self) -> None:
+        flow = read_csv(self.output_dir / TABLE_DIR / "cohort_flow.csv")
+        self.assertEqual(flow["encounters"].astype(int).tolist(), [101_766, 99_343, 69_990])
+
+        comparisons = (
+            ("discharge_eligibility_profile", {"eligible": 99_343, "excluded": 2_423}),
+            ("representative_encounter_profile", {"representative": 16_341, "other_eligible": 29_353}),
+        )
+        for name, expected in comparisons:
+            with self.subTest(table=name):
+                frame = read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")
+                actual = frame.groupby(["group", "attribute"])
+                self.assertEqual(set(frame["group"]), set(expected))
+                self.assertEqual(set(frame["attribute"]), {"age", "time_in_hospital", "admission_type_id"})
+                self.assertEqual(actual.ngroups, 6)
+                for (group, _), rows in actual:
+                    self.assertEqual(rows["encounters"].astype(int).sum(), expected[group])
+                    self.assertEqual(set(rows["group_encounters"].astype(int)), {expected[group]})
+                    self.assertAlmostEqual(rows["percent_of_group"].astype(float).sum(), 100)
+
+        distribution = read_csv(self.output_dir / TABLE_DIR / "eligible_encounters_per_patient.csv")
+        multiple = distribution.loc[distribution["eligible_encounters_per_patient"].astype(int).gt(1)]
+        self.assertEqual(distribution["patients"].astype(int).sum(), 69_990)
+        self.assertEqual(multiple["patients"].astype(int).sum(), 16_341)
+        self.assertEqual(multiple["eligible_encounters"].astype(int).sum(), 45_694)
+
+        overlap = read_csv(self.output_dir / TABLE_DIR / "discharge_patient_overlap.csv").set_index("group")
+        self.assertEqual(overlap["patients"].astype(int).to_dict(), {
+            "eligible_only": 69_119, "eligible_and_excluded": 871, "excluded_only": 1_528,
+        })
+        self.assertEqual(overlap["patients"].astype(int).sum(), 71_518)
+
+    def test_information_coverage_reconciles_with_overall_recording_patterns(self) -> None:
+        history = read_csv(self.output_dir / TABLE_DIR / "lab_recording_by_prior_history.csv")
+        characteristics = read_csv(self.output_dir / TABLE_DIR / "lab_recording_by_characteristic.csv")
+        patterns = read_csv(self.output_dir / TABLE_DIR / "lab_recording_patterns.csv")
+        status = {
+            ("False", "False"): "neither", ("True", "False"): "a1c_only",
+            ("False", "True"): "glucose_only", ("True", "True"): "both",
+        }
+        expected = {
+            status[(row.a1c_result_recorded, row.glucose_result_recorded)]: int(row.patients)
+            for row in patterns.itertuples(index=False)
+        }
+        expected["unknown"] = 0
+        self.assertEqual(sum(expected.values()), 69_990)
+        self.assertEqual(history.groupby("lab_recording_pattern")["patients"].agg(
+            lambda counts: counts.astype(int).sum(),
+        ).to_dict(), expected)
+        self.assertEqual(set(characteristics["characteristic"]), {
+            "age", "admission_type_id", "admission_source_id", "time_in_hospital",
+        })
+        for _, rows in characteristics.groupby("characteristic"):
+            totals = rows.assign(patients=rows["patients"].astype(int)).groupby("lab_recording_pattern")["patients"]
+            self.assertEqual(totals.sum().to_dict(), expected)
+
+        combined = history.set_index(["prior_history", "lab_recording_pattern"])
+        self.assertEqual(int(combined.at[("no_recorded_prior_visits", "neither"), "patients"]), 39_726)
+        for frame, keys in ((history, "prior_history"), (characteristics, ["characteristic", "value"])):
+            for _, rows in frame.groupby(keys):
+                counts = rows["patients"].astype(int)
+                denominator = counts.sum()
+                self.assertEqual(set(rows["group_patients"].astype(int)), {denominator})
+                self.assertEqual(rows["small_cell"].eq("True").tolist(), counts.lt(30).tolist())
+                if denominator:
+                    for count, percent in zip(counts, rows["percent_of_group"].astype(float), strict=True):
+                        self.assertAlmostEqual(percent, 100 * count / denominator)
+                else:
+                    self.assertTrue(rows["percent_of_group"].eq("").all())
+
+    def test_admission_tables_reconcile_with_nominal_profiles(self) -> None:
+        def read_table(name: str) -> pd.DataFrame:
+            return read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")
+
+        nominal = read_table("admission_descriptions")
+        pairs = read_table("admission_type_source")
+        pairs["patients"] = pairs["patients"].astype(int)
+        ages = read_table("age_by_admission")
+        numeric = read_table("numeric_by_admission")
+
+        for column, key in (("admission_type_id", "admission_type_code"), ("admission_source_id", "admission_source_code")):
+            labels = nominal.loc[nominal["column"].eq(column)].set_index("code")
+            expected = labels["patients"].astype(int).to_dict()
+            self.assertEqual(pairs.groupby(key)["patients"].sum().to_dict(), expected)
+            age_rows = ages.loc[ages["column"].eq(column)].assign(patients=lambda rows: rows["patients"].astype(int))
+            self.assertEqual(age_rows.groupby("code")["patients"].sum().to_dict(), expected)
+            summaries = numeric.loc[numeric["column"].eq(column)]
+            self.assertEqual(set(summaries["measure"]), set(COUNT_COLUMNS))
+            for _, rows in summaries.groupby("measure"):
+                self.assertEqual(rows.set_index("code")["group_patients"].astype(int).to_dict(), expected)
+                self.assertEqual(
+                    (rows["valid"].astype(int) + rows["missing"].astype(int)).tolist(),
+                    rows["group_patients"].astype(int).tolist(),
+                )
+            status = pairs[[key, key.replace("_code", "_lookup_status")]].drop_duplicates().set_index(key)
+            self.assertEqual(status.iloc[:, 0].to_dict(), labels["lookup_status"].to_dict())
+
+        for _, rows in pairs.groupby("admission_type_code"):
+            self.assertEqual(set(rows["type_patients"].astype(int)), {rows["patients"].sum()})
+            for count, share in zip(rows["patients"], rows["percent_of_admission_type"].astype(float), strict=True):
+                self.assertAlmostEqual(share, 100 * count / rows["patients"].sum())
+
+    def test_diagnosis_depth_reconciles_with_nominal_coverage(self) -> None:
+        depth = read_csv(self.output_dir / TABLE_DIR / "diagnosis_position_depth.csv").astype({
+            "mapped_positions": int, "distinct_mapped_groups": int, "patients": int,
+            "missing_positions": int, "unmapped_positions": int,
+        })
+        complete = depth.loc[depth["mapped_positions"].eq(3)].set_index("distinct_mapped_groups")
+        self.assertEqual(complete["patients"].to_dict(), {1: 7_360, 2: 31_070, 3: 30_276})
+        coverage = read_csv(self.output_dir / TABLE_DIR / "diagnosis_coverage.csv")
+        nominal_coverage = coverage.set_index(coverage["positions_with_mapped_codes"].astype(int))
+        totals = depth.groupby("mapped_positions")["patients"].sum()
+        self.assertEqual(totals.reindex(nominal_coverage.index, fill_value=0).to_dict(),
+                         nominal_coverage["patients"].astype(int).to_dict())
+        nominal = read_csv(self.output_dir / TABLE_DIR / "diagnosis_summary.csv").set_index("group")
+        for status in ("Missing", "Unmapped"):
+            positions = [f"diag_{n}_group_patients" for n in (1, 2, 3)]
+            expected = nominal.loc[status, positions].astype(int).sum()
+            actual = (depth[f"{status.lower()}_positions"] * depth["patients"]).sum()
+            self.assertEqual(actual, expected)
+
+        gain = read_csv(self.output_dir / TABLE_DIR / "diagnosis_group_gain.csv").set_index("group")
+        for row in gain.itertuples():
+            expected = nominal.loc[row.Index]
+            self.assertEqual(row.patients_at_primary_position, expected["diag_1_group_patients"])
+            self.assertEqual(row.patients_at_any_position, expected["patients_at_any_position"])
+            self.assertEqual(int(row.additional_patients),
+                             int(row.patients_at_any_position) - int(row.patients_at_primary_position))
+
+    def test_medication_tables_reconcile_with_source_flags_and_retained_statuses(self) -> None:
+        def read_table(name: str) -> pd.DataFrame:
+            return read_csv(self.output_dir / TABLE_DIR / f"{name}.csv")
+
+        flags = read_table("medication_flags")
+        reconciliation = read_table("medication_flag_reconciliation")
+        for flag, level, expected, matching in (("diabetesMed", "Yes", 34, 34), ("change", "Ch", 14_247, 1)):
+            legacy = flags.loc[flags["source_flag"].eq(flag) & flags["flag_value"].eq(level)]
+            legacy_zero = legacy.loc[legacy["retained_status"].eq("0"), "patients"]
+            self.assertEqual(legacy_zero.astype(int).sum(), expected)
+            rows = reconciliation.loc[reconciliation["source_flag"].eq(flag)]
+            self.assertEqual(set(rows["flag_group_patients"].astype(int)), {legacy["patients"].astype(int).sum()})
+            self.assertEqual(set(rows["comparison_patients"].astype(int)), {expected})
+            self.assertEqual(rows["patients"].astype(int).sum(), expected)
+            self.assertEqual(int(rows.set_index("excluded_status").at["matching_status_recorded", "patients"]), matching)
+
+        nominal = read_table("medication_status").set_index("column")
+        distribution = read_table("medication_count_distribution")
+        expected_totals = {
+            "recorded_status": nominal[["steady_patients", "up_patients", "down_patients"]].astype(int).to_numpy().sum(),
+            "up_or_down": nominal[["up_patients", "down_patients"]].astype(int).to_numpy().sum(),
+        }
+        for measure, rows in distribution.groupby("measure"):
+            patients = rows["patients"].astype(int)
+            self.assertEqual(patients.sum(), 69_990)
+            self.assertEqual((patients * rows["medications"].astype(int)).sum(), expected_totals[measure])
+
+        pairs = read_table("insulin_medication_pairs").set_index("medication")
+        insulin_patients = int(nominal.at["insulin", "any_non_no_patients"])
+        self.assertEqual(set(pairs["insulin_patients"].astype(int)), {insulin_patients})
+        self.assertEqual(len(pairs), 11)
+        for count, percent in zip(
+            pairs["pair_patients"].astype(int), pairs["percent_of_insulin_patients"].astype(float), strict=True,
+        ):
+            self.assertAlmostEqual(percent, 100 * count / insulin_patients)
