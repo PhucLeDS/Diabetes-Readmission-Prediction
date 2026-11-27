@@ -18,7 +18,7 @@ from src.eda.cohort_selection import MINIMUM_GROUP_SIZE, profile_cohort_selectio
 from src.eda.data import load_eda_inputs
 from src.eda.descriptive import QUANTILES, profile_completeness, profile_numeric
 from src.eda.diagnosis_detail import profile_diagnosis_detail
-from src.eda.findings import summarize_findings
+from src.eda.findings import analysis_directions, summarize_findings
 from src.eda.information_coverage import profile_information_coverage
 from src.eda.medication_detail import (
     ADJUSTED_STATUSES, EXCLUDED_MEDICATION_COLUMNS, RECORDED_STATUSES, profile_medication_detail,
@@ -157,13 +157,18 @@ def export_eda(output_dir: Path = OUTPUT_DIR, *, overwrite: bool = False) -> Pat
     diagnoses = profile_diagnosis_detail(eda.cohort, eda.source_cohort, nominal.diagnosis_summary)
     medications = profile_medication_detail(eda.cohort, eda.source_cohort)
     relationships = profile_relationships(eda.cohort)
-    findings = summarize_findings(eda, completeness, numeric, nominal, relationships)
+    findings = summarize_findings(
+        eda, completeness, numeric, nominal, relationships,
+        selection=selection, information_coverage=coverage, admission=admission,
+        diagnosis_detail=diagnoses, medication_detail=medications,
+    )
     tables = {
         "cohort_flow": eda.cohort_flow,
         "column_dictionary": eda.column_dictionary,
         "source_feature_decisions": eda.source_feature_decisions,
         "admission_lookup": eda.admission_descriptions,
         "eda_findings": findings,
+        "eda_analysis_directions": analysis_directions(),
     }
     for profile in (selection, completeness, coverage, numeric, nominal, admission, diagnoses, medications, relationships):
         for field in fields(profile):

@@ -286,7 +286,7 @@ class EdaExportTests(TestCase):
         }
         files.pop(MANIFEST_PATH.as_posix())
         self.assertEqual(files, manifest["artifact_sha256"])
-        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 41, ".png": 14})
+        self.assertEqual(Counter(Path(path).suffix for path in files), {".csv": 42, ".png": 14})
         for relative in files:
             if relative.endswith(".csv"):
                 columns = read_csv(self.output_dir / relative).columns
@@ -316,6 +316,29 @@ class EdaExportTests(TestCase):
         findings = {row["finding"]: row for row in table("eda_findings")}
         self.assertIn("28,511/69,990", findings["Any Readmission"]["evidence"])
         self.assertIn("54,041/69,990", findings["Laboratory coverage"]["evidence"])
+
+    def test_handoff_connects_analysis_directions_to_exported_evidence(self) -> None:
+        findings = read_csv(self.output_dir / TABLE_DIR / "eda_findings.csv").set_index("finding")
+        self.assertTrue(findings.index.is_unique)
+        self.assertIn("215/246 (87.40%)", findings.at["Laboratory coverage by admission type", "evidence"])
+        self.assertIn("215/4,516 (4.76%)", findings.at["Laboratory coverage by admission type", "evidence"])
+        self.assertIn("30,719/69,990 (43.89%)", findings.at["Diagnosis count distribution", "evidence"])
+        self.assertIn("73/69,990 (0.10%)", findings.at["Diagnosis count distribution", "evidence"])
+        self.assertIn("21,830 patients", findings.at["Diabetes diagnosis group coverage", "evidence"])
+        self.assertIn("31.19 percentage points", findings.at["Diabetes diagnosis group coverage", "evidence"])
+        for sources in findings["source_table"]:
+            for filename in sources.split(", "):
+                self.assertTrue((self.output_dir / TABLE_DIR / filename).is_file(), filename)
+
+        directions = read_csv(self.output_dir / TABLE_DIR / "eda_analysis_directions.csv")
+        self.assertTrue(directions["direction"].is_unique)
+        self.assertFalse(directions.eq("").any().any())
+        links = directions["supporting_findings"].str.split(", ").explode()
+        self.assertEqual(set(links), set(findings.index))
+        self.assertIn("38,430/68,706", findings.at["Diagnosis depth and overlap", "evidence"])
+        self.assertIn("13,607/69,990", findings.at["Diagnosis depth and overlap", "evidence"])
+        self.assertIn("22,129/69,990", findings.at["Insulin and metformin records", "evidence"])
+        self.assertIn("763/2,423", findings.at["Discharge eligibility", "evidence"])
 
     def test_cohort_selection_counts_reconcile(self) -> None:
         flow = read_csv(self.output_dir / TABLE_DIR / "cohort_flow.csv")
