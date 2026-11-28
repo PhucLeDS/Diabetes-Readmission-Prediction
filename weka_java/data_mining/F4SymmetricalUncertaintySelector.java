@@ -1,4 +1,4 @@
-package diabetes.datamining;
+package weka_java.data_mining;
 
 import java.util.ArrayList;
 import java.util.List;
