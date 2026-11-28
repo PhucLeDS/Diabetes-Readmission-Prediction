@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Set;
 
 import weka.clusterers.SimpleKMeans;
+import weka.core.Attribute;
 import weka.core.EuclideanDistance;
 import weka.core.Instances;
 import weka.core.SelectedTag;
@@ -15,21 +16,26 @@ import weka.filters.unsupervised.attribute.Remove;
 import weka.filters.unsupervised.attribute.Standardize;
 
 /**
- * Clustering config C2: K-Means with k = 5 on feature space CS3.
+ * Clustering C2: K-Means with k = 5 on feature space CS3 (8 numeric utilization/complexity
+ * features).
  *
- * <p>Mirrors {@code PatientClusterer(config_id="C2", feature_space="CS3")} in
- * clustering.py:
- * <ul>
- *   <li>Z-score scaling is learned from Train only (Weka Standardize).</li>
- *   <li>K-Means uses k-means++ initialisation and {@value #N_INIT} restarts with
- *       seeds {@code randomState + run}. The run with the smallest squared error
- *       is kept, similar to scikit-learn's {@code n_init}.</li>
- *   <li>Weka's EuclideanDistance is set to {@code dontNormalize}, so distances are
- *       computed on the z-scores as in scikit-learn. Without this, SimpleKMeans
- *       would min-max normalise the data a second time.</li>
- * </ul>
- * Labels from Weka and scikit-learn can differ by permutation and by tie or
- * convergence details. Compare with the parity test, not by exact equality.
+ * <p>Self-contained: takes plain {@link Instances} only, so it does not depend on how the data
+ * was loaded. Wire it to {@code model.DataLoader.Data} from the caller, for example:
+ * <pre>{@code
+ *     DataLoader.Data data = DataLoader.load(dir, "readmitted");
+ *
+ *     // Development: tune on Train, compare on Validation.
+ *     KMeansCS3Clusterer devClusterer = new KMeansCS3Clusterer(42);
+ *     int[] trainClusters = devClusterer.fitTransform(data.train());
+ *     int[] valClusters = devClusterer.transform(data.val());
+ *
+ *     // Final: refit on Train+Validation, score once on the held-out Test.
+ *     KMeansCS3Clusterer finalClusterer = new KMeansCS3Clusterer(42);
+ *     int[] trainValClusters = finalClusterer.fitTransform(data.trainVal());
+ *     int[] testClusters = finalClusterer.transform(data.test());
+ * }</pre>
+ * Preprocessing (Standardize) and the cluster centroids are learned only from the split passed to
+ * {@link #fitTransform}; {@link #transform} reuses them without refitting.
  */
 public final class KMeansCS3Clusterer {
 
@@ -50,14 +56,14 @@ public final class KMeansCS3Clusterer {
         this.randomState = randomState;
     }
 
-    /** Fits scaling and K-Means on Train and returns the Train cluster index of each row. */
-    public int[] fitTransform(Instances train) throws Exception {
-        D0Loader.requireNoMissing(train, CS3_FEATURES);
+    /** Fits scaling and K-Means on {@code data} and returns its cluster index per row. */
+    public int[] fitTransform(Instances data) throws Exception {
+        requireNoMissing(data, CS3_FEATURES);
 
         selectCs3 = new Remove();
-        selectCs3.setAttributeIndices(indicesToRemove(train, CS3_FEATURES));
-        selectCs3.setInputFormat(train);
-        Instances cs3 = Filter.useFilter(train, selectCs3);
+        selectCs3.setAttributeIndices(indicesToRemove(data, CS3_FEATURES));
+        selectCs3.setInputFormat(data);
+        Instances cs3 = Filter.useFilter(data, selectCs3);
 
         standardize = new Standardize();
         standardize.setInputFormat(cs3);
@@ -67,12 +73,12 @@ public final class KMeansCS3Clusterer {
         return assign(scaled);
     }
 
-    /** Assigns clusters to Validation or Test rows with the Train-fitted scaler and centroids. */
+    /** Assigns clusters to another split using the already-fitted scaler and centroids. */
     public int[] transform(Instances data) throws Exception {
         if (model == null) {
             throw new IllegalStateException("Call fitTransform() before transform().");
         }
-        D0Loader.requireNoMissing(data, CS3_FEATURES);
+        requireNoMissing(data, CS3_FEATURES);
         Instances cs3 = Filter.useFilter(data, selectCs3);
         Instances scaled = Filter.useFilter(cs3, standardize);
         return assign(scaled);
@@ -95,7 +101,7 @@ public final class KMeansCS3Clusterer {
 
     private static SimpleKMeans newKMeans(int seed) throws Exception {
         EuclideanDistance distance = new EuclideanDistance();
-        distance.setDontNormalize(true);
+        distance.setDontNormalize(true); // distances on z-scores, not Weka's own min-max scaling
 
         SimpleKMeans kmeans = new SimpleKMeans();
         kmeans.setNumClusters(N_CLUSTERS);
@@ -116,27 +122,41 @@ public final class KMeansCS3Clusterer {
         return labels;
     }
 
-    /** 1-based indices of every attribute that is not in {@code keep}. */
-    static String indicesToRemove(Instances data, String[] keep) {
+    /** Fails fast if any of the named attributes has a missing value in {@code data}. */
+    private static void requireNoMissing(Instances data, String[] names) {
+        for (String name : names) {
+            Attribute attribute = data.attribute(name);
+            if (attribute == null) {
+                throw new IllegalArgumentException("Missing attribute: " + name);
+            }
+            for (int i = 0; i < data.numInstances(); i++) {
+                if (data.instance(i).isMissing(attribute.index())) {
+                    throw new IllegalStateException("Missing value in '" + name + "' at row " + i);
+                }
+            }
+        }
+    }
+
+    /** 1-based indices of every attribute that is not in {@code keep} (for Weka's Remove). */
+    private static String indicesToRemove(Instances data, String[] keep) {
+        List<String> missing = new ArrayList<>();
+        for (String name : keep) {
+            if (data.attribute(name) == null) {
+                missing.add(name);
+            }
+        }
+        if (!missing.isEmpty()) {
+            throw new IllegalArgumentException("Missing CS3 feature(s): " + missing);
+        }
         Set<String> keepSet = new HashSet<>(Arrays.asList(keep));
         StringBuilder builder = new StringBuilder();
         for (int i = 0; i < data.numAttributes(); i++) {
-            String name = data.attribute(i).name();
-            if (!keepSet.contains(name)) {
+            if (!keepSet.contains(data.attribute(i).name())) {
                 if (builder.length() > 0) {
                     builder.append(',');
                 }
                 builder.append(i + 1);
             }
-        }
-        List<String> found = new ArrayList<>();
-        for (String name : keep) {
-            if (data.attribute(name) == null) {
-                found.add(name);
-            }
-        }
-        if (!found.isEmpty()) {
-            throw new IllegalArgumentException("Missing CS3 feature(s): " + found);
         }
         return builder.toString();
     }
